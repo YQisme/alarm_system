@@ -1,0 +1,15 @@
+{
+  "font_size": 28,
+  "box_color": [
+    0,
+    115,
+    255
+  ],
+  "box_thickness": 7,
+  "text_color": [
+    160,
+    24,
+    24
+  ],
+  "use_chinese": false
+}
