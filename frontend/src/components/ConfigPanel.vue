@@ -1,0 +1,706 @@
+<template>
+  <div class="config-panel">
+    <el-tabs v-model="activeTab" type="border-card">
+      <!-- 模型配置 -->
+      <el-tab-pane label="模型配置" name="model">
+        <el-form :model="modelForm" label-width="120px">
+          <el-form-item label="检测模型">
+            <el-select v-model="modelForm.model" placeholder="加载中..." style="width: 100%">
+              <el-option
+                v-for="model in models"
+                :key="model.name"
+                :label="`${model.name} (${model.size_mb} MB)`"
+                :value="model.name"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" @click="applyModel" :loading="modelLoading">应用</el-button>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+
+      <!-- 视频配置 -->
+      <el-tab-pane label="视频配置" name="video">
+        <el-form :model="videoForm" label-width="120px">
+          <el-form-item label="视频URL">
+            <el-input v-model="videoForm.video_url" placeholder="rtsp://..." />
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" @click="applyVideo" :loading="videoLoading">应用</el-button>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+
+      <!-- 类别配置 -->
+      <el-tab-pane label="检测类别" name="classes">
+        <div class="classes-controls">
+          <el-button size="small" @click="selectAllClasses">全选</el-button>
+          <el-button size="small" @click="deselectAllClasses">全不选</el-button>
+          <el-button type="primary" size="small" @click="applyClasses" :loading="classesLoading">应用</el-button>
+        </div>
+        <el-scrollbar height="300px" style="margin-top: 15px">
+          <div class="classes-list">
+            <div
+              v-for="cls in classesData"
+              :key="cls.id"
+              class="class-item"
+              :class="{ enabled: enabledClasses.includes(cls.id) }"
+            >
+              <el-checkbox
+                v-model="enabledClasses"
+                :label="cls.id"
+                @change="handleClassToggle(cls.id)"
+              >
+                <span class="class-name-cn">{{ cls.name_cn }}</span>
+                <span class="class-name-en">({{ cls.name_en }})</span>
+              </el-checkbox>
+              <el-input
+                v-model="cls.custom_name"
+                size="small"
+                placeholder="自定义名称"
+                style="width: 120px; margin-left: 10px"
+                @blur="saveCustomName(cls.id)"
+              />
+              <el-input-number
+                v-model="cls.confidence_threshold"
+                size="small"
+                :min="0"
+                :max="1"
+                :step="0.01"
+                :precision="2"
+                style="width: 100px; margin-left: 10px"
+                @blur="saveConfidence(cls.id)"
+              />
+            </div>
+          </div>
+        </el-scrollbar>
+      </el-tab-pane>
+
+      <!-- 显示配置 -->
+      <el-tab-pane label="显示设置" name="display">
+        <el-form :model="displayForm" label-width="120px">
+          <el-form-item label="字体大小">
+            <el-input-number v-model="displayForm.font_size" :min="8" :max="72" />
+          </el-form-item>
+          <el-form-item label="边框粗细">
+            <el-input-number v-model="displayForm.box_thickness" :min="1" :max="10" />
+          </el-form-item>
+          <el-form-item label="边框颜色">
+            <el-color-picker v-model="displayForm.box_color_hex" />
+            <el-input
+              v-model="displayForm.box_color_rgb"
+              placeholder="RGB: 0,255,0"
+              style="width: 150px; margin-left: 10px"
+            />
+          </el-form-item>
+          <el-form-item label="文字颜色">
+            <el-color-picker v-model="displayForm.text_color_hex" />
+            <el-input
+              v-model="displayForm.text_color_rgb"
+              placeholder="RGB: 0,0,0"
+              style="width: 150px; margin-left: 10px"
+            />
+          </el-form-item>
+          <el-form-item label="显示语言">
+            <el-button
+              :type="displayForm.use_chinese ? 'default' : 'primary'"
+              @click="toggleLanguage"
+            >
+              {{ displayForm.use_chinese ? '切换为英文' : '切换为中文' }}
+            </el-button>
+            <span style="margin-left: 10px; color: #666">
+              当前: {{ displayForm.use_chinese ? '中文' : '英文' }}
+            </span>
+          </el-form-item>
+          <el-divider />
+          <el-form-item label="报警区域填充颜色">
+            <el-color-picker v-model="displayForm.zone_fill_color_hex" />
+            <el-input
+              v-model="displayForm.zone_fill_color_rgb"
+              placeholder="RGB: 0,255,255"
+              style="width: 150px; margin-left: 10px"
+            />
+          </el-form-item>
+          <el-form-item label="报警区域边框颜色">
+            <el-color-picker v-model="displayForm.zone_border_color_hex" />
+            <el-input
+              v-model="displayForm.zone_border_color_rgb"
+              placeholder="RGB: 0,255,255"
+              style="width: 150px; margin-left: 10px"
+            />
+          </el-form-item>
+          <el-form-item label="填充透明度">
+            <el-slider
+              v-model="displayForm.zone_fill_alpha"
+              :min="0"
+              :max="1"
+              :step="0.1"
+              :show-input="true"
+              :format-tooltip="(val) => `${(val * 100).toFixed(0)}%`"
+              style="width: 300px"
+            />
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" @click="applyDisplay" :loading="displayLoading">应用显示设置</el-button>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+
+      <!-- 报警配置 -->
+      <el-tab-pane label="报警设置" name="alarm">
+        <el-form :model="alarmForm" label-width="150px">
+          <el-form-item label="防抖时间（秒）">
+            <el-input-number
+              v-model="alarmForm.debounce_time"
+              :min="0"
+              :max="300"
+              :step="0.1"
+              :precision="1"
+            />
+            <span style="margin-left: 10px; color: #666; font-size: 12px">
+              同一目标在此时间内只报警一次
+            </span>
+          </el-form-item>
+          <el-form-item label="检测模式">
+            <el-select v-model="alarmForm.detection_mode" style="width: 100%">
+              <el-option
+                label="中心点模式（检测框中心点进入区域）"
+                value="center"
+              />
+              <el-option
+                label="边框模式（检测框任意点进入区域）"
+                value="edge"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="相同ID只报警一次">
+            <el-switch v-model="alarmForm.once_per_id" />
+            <span style="margin-left: 10px; color: #666; font-size: 12px">
+              启用后，同一ID在整个生命周期内只报警一次
+            </span>
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" @click="applyAlarm" :loading="alarmLoading">应用报警设置</el-button>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+    </el-tabs>
+  </div>
+</template>
+
+<script setup>
+import { ref, onMounted, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import axios from 'axios'
+
+const emit = defineEmits(['model-changed', 'video-changed', 'classes-changed', 'display-changed', 'alarm-changed'])
+
+const activeTab = ref('model')
+const models = ref([])
+const classesData = ref([])
+const enabledClasses = ref([])
+
+const modelForm = ref({ model: '' })
+const videoForm = ref({ video_url: '' })
+const displayForm = ref({
+  font_size: 16,
+  box_thickness: 2,
+  box_color_hex: '#00ff00',
+  box_color_rgb: '0,255,0',
+  text_color_hex: '#000000',
+  text_color_rgb: '0,0,0',
+  use_chinese: true,
+  zone_fill_color_hex: '#00ffff',
+  zone_fill_color_rgb: '0,255,255',
+  zone_border_color_hex: '#00ffff',
+  zone_border_color_rgb: '0,255,255',
+  zone_fill_alpha: 0.3
+})
+const alarmForm = ref({
+  debounce_time: 5.0,
+  detection_mode: 'center',
+  once_per_id: false
+})
+
+const modelLoading = ref(false)
+const videoLoading = ref(false)
+const classesLoading = ref(false)
+const displayLoading = ref(false)
+const alarmLoading = ref(false)
+
+// RGB 和 Hex 转换
+const rgbToHex = (r, g, b) => {
+  return '#' + [r, g, b].map(x => {
+    const hex = x.toString(16)
+    return hex.length === 1 ? '0' + hex : hex
+  }).join('')
+}
+
+const hexToRgb = (hex) => {
+  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex)
+  return result ? [
+    parseInt(result[1], 16),
+    parseInt(result[2], 16),
+    parseInt(result[3], 16)
+  ] : null
+}
+
+// 颜色选择器和RGB输入框的双向同步
+watch(() => displayForm.value.box_color_hex, (newHex) => {
+  if (newHex) {
+    const rgb = hexToRgb(newHex)
+    if (rgb) {
+      displayForm.value.box_color_rgb = `${rgb[0]},${rgb[1]},${rgb[2]}`
+    }
+  }
+})
+
+watch(() => displayForm.value.text_color_hex, (newHex) => {
+  if (newHex) {
+    const rgb = hexToRgb(newHex)
+    if (rgb) {
+      displayForm.value.text_color_rgb = `${rgb[0]},${rgb[1]},${rgb[2]}`
+    }
+  }
+})
+
+watch(() => displayForm.value.box_color_rgb, (newRgb) => {
+  if (newRgb) {
+    const rgbArray = newRgb.split(',').map(x => parseInt(x.trim()))
+    if (rgbArray.length === 3 && rgbArray.every(x => !isNaN(x) && x >= 0 && x <= 255)) {
+      const hex = rgbToHex(rgbArray[0], rgbArray[1], rgbArray[2])
+      if (displayForm.value.box_color_hex !== hex) {
+        displayForm.value.box_color_hex = hex
+      }
+    }
+  }
+})
+
+watch(() => displayForm.value.text_color_rgb, (newRgb) => {
+  if (newRgb) {
+    const rgbArray = newRgb.split(',').map(x => parseInt(x.trim()))
+    if (rgbArray.length === 3 && rgbArray.every(x => !isNaN(x) && x >= 0 && x <= 255)) {
+      const hex = rgbToHex(rgbArray[0], rgbArray[1], rgbArray[2])
+      if (displayForm.value.text_color_hex !== hex) {
+        displayForm.value.text_color_hex = hex
+      }
+    }
+  }
+})
+
+watch(() => displayForm.value.zone_fill_color_hex, (newHex) => {
+  if (newHex) {
+    const rgb = hexToRgb(newHex)
+    if (rgb) {
+      displayForm.value.zone_fill_color_rgb = `${rgb[0]},${rgb[1]},${rgb[2]}`
+    }
+  }
+})
+
+watch(() => displayForm.value.zone_border_color_hex, (newHex) => {
+  if (newHex) {
+    const rgb = hexToRgb(newHex)
+    if (rgb) {
+      displayForm.value.zone_border_color_rgb = `${rgb[0]},${rgb[1]},${rgb[2]}`
+    }
+  }
+})
+
+watch(() => displayForm.value.zone_fill_color_rgb, (newRgb) => {
+  if (newRgb) {
+    const rgbArray = newRgb.split(',').map(x => parseInt(x.trim()))
+    if (rgbArray.length === 3 && rgbArray.every(x => !isNaN(x) && x >= 0 && x <= 255)) {
+      const hex = rgbToHex(rgbArray[0], rgbArray[1], rgbArray[2])
+      if (displayForm.value.zone_fill_color_hex !== hex) {
+        displayForm.value.zone_fill_color_hex = hex
+      }
+    }
+  }
+})
+
+watch(() => displayForm.value.zone_border_color_rgb, (newRgb) => {
+  if (newRgb) {
+    const rgbArray = newRgb.split(',').map(x => parseInt(x.trim()))
+    if (rgbArray.length === 3 && rgbArray.every(x => !isNaN(x) && x >= 0 && x <= 255)) {
+      const hex = rgbToHex(rgbArray[0], rgbArray[1], rgbArray[2])
+      if (displayForm.value.zone_border_color_hex !== hex) {
+        displayForm.value.zone_border_color_hex = hex
+      }
+    }
+  }
+})
+
+// 加载数据
+onMounted(() => {
+  loadModels()
+  loadVideoUrl()
+  loadClasses()
+  loadDisplayConfig()
+  loadAlarmConfig()
+})
+
+const loadModels = async () => {
+  try {
+    const res = await axios.get('/api/models')
+    models.value = res.data.models || []
+    const current = models.value.find(m => m.current)
+    if (current) {
+      modelForm.value.model = current.name
+    }
+  } catch (error) {
+    console.error('加载模型列表失败:', error)
+    ElMessage.error('加载模型列表失败')
+  }
+}
+
+const loadVideoUrl = async () => {
+  try {
+    const res = await axios.get('/api/video')
+    if (res.data.video_url) {
+      videoForm.value.video_url = res.data.video_url
+    }
+  } catch (error) {
+    console.error('加载视频URL失败:', error)
+  }
+}
+
+const loadClasses = async () => {
+  try {
+    const res = await axios.get('/api/classes')
+    classesData.value = res.data.classes || []
+    enabledClasses.value = res.data.enabled_classes || []
+  } catch (error) {
+    console.error('加载类别列表失败:', error)
+    ElMessage.error('加载类别列表失败')
+  }
+}
+
+const loadDisplayConfig = async () => {
+  try {
+    const res = await axios.get('/api/display')
+    if (res.data.font_size) {
+      displayForm.value.font_size = res.data.font_size
+    }
+    if (res.data.box_thickness) {
+      displayForm.value.box_thickness = res.data.box_thickness
+    }
+    if (res.data.box_color) {
+      // 后端已经返回 RGB 格式，直接使用
+      const rgb = res.data.box_color
+      displayForm.value.box_color_hex = rgbToHex(rgb[0], rgb[1], rgb[2])
+      displayForm.value.box_color_rgb = rgb.join(',')
+    }
+    if (res.data.text_color) {
+      displayForm.value.text_color_hex = rgbToHex(
+        res.data.text_color[0],
+        res.data.text_color[1],
+        res.data.text_color[2]
+      )
+      displayForm.value.text_color_rgb = res.data.text_color.join(',')
+    }
+    if (res.data.use_chinese !== undefined) {
+      displayForm.value.use_chinese = res.data.use_chinese
+    }
+    if (res.data.zone_fill_color) {
+      const rgb = res.data.zone_fill_color
+      displayForm.value.zone_fill_color_hex = rgbToHex(rgb[0], rgb[1], rgb[2])
+      displayForm.value.zone_fill_color_rgb = rgb.join(',')
+    }
+    if (res.data.zone_border_color) {
+      const rgb = res.data.zone_border_color
+      displayForm.value.zone_border_color_hex = rgbToHex(rgb[0], rgb[1], rgb[2])
+      displayForm.value.zone_border_color_rgb = rgb.join(',')
+    }
+    if (res.data.zone_fill_alpha !== undefined) {
+      displayForm.value.zone_fill_alpha = res.data.zone_fill_alpha
+    }
+  } catch (error) {
+    console.error('加载显示配置失败:', error)
+  }
+}
+
+const loadAlarmConfig = async () => {
+  try {
+    const res = await axios.get('/api/alarm')
+    if (res.data.debounce_time !== undefined) {
+      alarmForm.value.debounce_time = res.data.debounce_time
+    }
+    if (res.data.detection_mode !== undefined) {
+      alarmForm.value.detection_mode = res.data.detection_mode
+    }
+    if (res.data.once_per_id !== undefined) {
+      alarmForm.value.once_per_id = res.data.once_per_id
+    }
+  } catch (error) {
+    console.error('加载报警配置失败:', error)
+  }
+}
+
+// 应用配置
+const applyModel = async () => {
+  if (!modelForm.value.model) {
+    ElMessage.warning('请选择一个模型')
+    return
+  }
+  
+  try {
+    await ElMessageBox.confirm(
+      `确定要切换到模型 "${modelForm.value.model}" 吗？切换后检测将使用新模型。`,
+      '确认切换',
+      { type: 'warning' }
+    )
+    
+    modelLoading.value = true
+    const res = await axios.post('/api/model', { model: modelForm.value.model })
+    if (res.data.success) {
+      ElMessage.success(res.data.message)
+      emit('model-changed')
+      loadModels()
+    } else {
+      ElMessage.error('切换失败: ' + res.data.message)
+    }
+  } catch (error) {
+    if (error !== 'cancel') {
+      console.error('切换模型失败:', error)
+      ElMessage.error('切换模型失败')
+    }
+  } finally {
+    modelLoading.value = false
+  }
+}
+
+const applyVideo = async () => {
+  if (!videoForm.value.video_url.trim()) {
+    ElMessage.warning('请输入视频URL')
+    return
+  }
+  
+  try {
+    await ElMessageBox.confirm(
+      `确定要更改视频源为 "${videoForm.value.video_url}" 吗？更改后视频流将重新连接。`,
+      '确认更改',
+      { type: 'warning' }
+    )
+    
+    videoLoading.value = true
+    const res = await axios.post('/api/video', { video_url: videoForm.value.video_url })
+    if (res.data.success) {
+      ElMessage.success(res.data.message)
+      emit('video-changed')
+    } else {
+      ElMessage.error('设置失败: ' + res.data.message)
+    }
+  } catch (error) {
+    if (error !== 'cancel') {
+      console.error('设置视频URL失败:', error)
+      ElMessage.error('设置视频URL失败')
+    }
+  } finally {
+    videoLoading.value = false
+  }
+}
+
+const selectAllClasses = () => {
+  enabledClasses.value = classesData.value.map(cls => cls.id)
+}
+
+const deselectAllClasses = () => {
+  enabledClasses.value = []
+}
+
+const handleClassToggle = (classId) => {
+  // 已由 checkbox 的 v-model 处理
+}
+
+const applyClasses = async () => {
+  if (enabledClasses.value.length === 0) {
+    ElMessage.warning('请至少选择一个类别')
+    return
+  }
+  
+  try {
+    await ElMessageBox.confirm(
+      `确定要启用 ${enabledClasses.value.length} 个类别吗？`,
+      '确认应用',
+      { type: 'warning' }
+    )
+    
+    classesLoading.value = true
+    const res = await axios.post('/api/classes/enabled', {
+      enabled_classes: enabledClasses.value
+    })
+    if (res.data.success) {
+      ElMessage.success(res.data.message)
+      emit('classes-changed')
+      loadClasses()
+    } else {
+      ElMessage.error('设置失败: ' + res.data.message)
+    }
+  } catch (error) {
+    if (error !== 'cancel') {
+      console.error('设置类别失败:', error)
+      ElMessage.error('设置类别失败')
+    }
+  } finally {
+    classesLoading.value = false
+  }
+}
+
+const saveCustomName = async (classId) => {
+  const cls = classesData.value.find(c => c.id === classId)
+  if (!cls) return
+  
+  try {
+    await axios.post('/api/classes/custom-name', {
+      class_id: classId,
+      custom_name: cls.custom_name || null
+    })
+    loadClasses()
+  } catch (error) {
+    console.error('保存自定义名称失败:', error)
+  }
+}
+
+const saveConfidence = async (classId) => {
+  const cls = classesData.value.find(c => c.id === classId)
+  if (!cls) return
+  
+  try {
+    await axios.post('/api/classes/confidence', {
+      class_id: classId,
+      confidence_threshold: cls.confidence_threshold
+    })
+    ElMessage.success('保存成功')
+    loadClasses()
+  } catch (error) {
+    console.error('保存置信度阈值失败:', error)
+    ElMessage.error('保存失败')
+  }
+}
+
+const toggleLanguage = async () => {
+  displayForm.value.use_chinese = !displayForm.value.use_chinese
+  await applyDisplay()
+}
+
+const applyDisplay = async () => {
+  const boxColorRgbArray = displayForm.value.box_color_rgb.split(',').map(x => parseInt(x.trim()))
+  if (boxColorRgbArray.length !== 3 || !boxColorRgbArray.every(x => !isNaN(x) && x >= 0 && x <= 255)) {
+    ElMessage.error('边框颜色格式错误，请输入RGB格式，如: 0,255,0')
+    return
+  }
+  // 前端发送 RGB 格式，后端会转换为 BGR
+  const boxColor = boxColorRgbArray // RGB 格式
+  
+  const textColorArray = displayForm.value.text_color_rgb.split(',').map(x => parseInt(x.trim()))
+  if (textColorArray.length !== 3 || !textColorArray.every(x => !isNaN(x) && x >= 0 && x <= 255)) {
+    ElMessage.error('文字颜色格式错误，请输入RGB格式，如: 0,0,0')
+    return
+  }
+  
+  const zoneFillColorArray = displayForm.value.zone_fill_color_rgb.split(',').map(x => parseInt(x.trim()))
+  if (zoneFillColorArray.length !== 3 || !zoneFillColorArray.every(x => !isNaN(x) && x >= 0 && x <= 255)) {
+    ElMessage.error('报警区域填充颜色格式错误，请输入RGB格式，如: 0,255,255')
+    return
+  }
+  
+  const zoneBorderColorArray = displayForm.value.zone_border_color_rgb.split(',').map(x => parseInt(x.trim()))
+  if (zoneBorderColorArray.length !== 3 || !zoneBorderColorArray.every(x => !isNaN(x) && x >= 0 && x <= 255)) {
+    ElMessage.error('报警区域边框颜色格式错误，请输入RGB格式，如: 0,255,255')
+    return
+  }
+  
+  displayLoading.value = true
+  try {
+    const res = await axios.post('/api/display', {
+      font_size: displayForm.value.font_size,
+      box_thickness: displayForm.value.box_thickness,
+      box_color: boxColor, // 发送 RGB 格式
+      text_color: textColorArray, // 发送 RGB 格式
+      use_chinese: displayForm.value.use_chinese,
+      zone_fill_color: zoneFillColorArray, // 发送 RGB 格式
+      zone_border_color: zoneBorderColorArray, // 发送 RGB 格式
+      zone_fill_alpha: displayForm.value.zone_fill_alpha
+    })
+    if (res.data.success) {
+      ElMessage.success(res.data.message)
+      emit('display-changed')
+    } else {
+      ElMessage.error('设置失败: ' + res.data.message)
+    }
+  } catch (error) {
+    console.error('设置显示配置失败:', error)
+    ElMessage.error('设置失败')
+  } finally {
+    displayLoading.value = false
+  }
+}
+
+const applyAlarm = async () => {
+  alarmLoading.value = true
+  try {
+    const res = await axios.post('/api/alarm', {
+      debounce_time: alarmForm.value.debounce_time,
+      detection_mode: alarmForm.value.detection_mode,
+      once_per_id: alarmForm.value.once_per_id
+    })
+    if (res.data.success) {
+      ElMessage.success(res.data.message)
+      emit('alarm-changed')
+    } else {
+      ElMessage.error('设置失败: ' + res.data.message)
+    }
+  } catch (error) {
+    console.error('设置报警配置失败:', error)
+    ElMessage.error('设置失败')
+  } finally {
+    alarmLoading.value = false
+  }
+}
+</script>
+
+<style scoped>
+.config-panel {
+  padding: 20px;
+}
+
+.classes-controls {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 15px;
+}
+
+.classes-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 10px;
+}
+
+.class-item {
+  padding: 10px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.class-item.enabled {
+  background: #f0f9ff;
+  border-color: #409eff;
+}
+
+.class-name-cn {
+  font-weight: 600;
+  color: #333;
+}
+
+.class-name-en {
+  font-size: 12px;
+  color: #666;
+  margin-left: 5px;
+}
+</style>
+

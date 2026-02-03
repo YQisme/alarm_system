@@ -1,5 +1,5 @@
 {
   "debounce_time": 5.0,
   "detection_mode": "center",
-  "once_per_id": true
+  "once_per_id": false
 }

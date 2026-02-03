@@ -22,8 +22,20 @@ CONFIG_DIR = os.path.join(BASE_DIR, 'config')
 # 确保config目录存在
 os.makedirs(CONFIG_DIR, exist_ok=True)
 
-app = Flask(__name__, static_folder=os.path.join(FRONTEND_DIR, 'static'), static_url_path='/static')
-CORS(app)  # 允许跨域请求
+# 检查是否为开发模式（Vite 开发服务器）
+VITE_DEV_MODE = os.environ.get('VITE_DEV', 'false').lower() == 'true'
+FRONTEND_DIST_DIR = os.path.join(FRONTEND_DIR, 'dist')
+
+if VITE_DEV_MODE:
+    # 开发模式：只提供 API，前端由 Vite 开发服务器提供
+    app = Flask(__name__)
+    # 允许所有来源的跨域请求（开发模式，支持IP访问）
+    CORS(app, origins="*")  # 允许所有来源，包括IP地址
+else:
+    # 生产模式：提供静态文件
+    app = Flask(__name__, static_folder=FRONTEND_DIST_DIR, static_url_path='')
+    CORS(app)  # 允许跨域请求
+
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # 设置日志系统（必须在其他模块之前初始化）
@@ -155,7 +167,10 @@ display_config = {
     "box_color": [0, 255, 0],  # 边框颜色 (BGR格式)
     "box_thickness": 2,  # 边框粗细
     "text_color": [0, 0, 0],  # 文字颜色 (RGB格式)
-    "use_chinese": True  # 是否使用中文显示（False时使用英文，性能更好）
+    "use_chinese": True,  # 是否使用中文显示（False时使用英文，性能更好）
+    "zone_fill_color": [0, 255, 255],  # 报警区域填充颜色 (BGR格式)
+    "zone_border_color": [0, 255, 255],  # 报警区域边框颜色 (BGR格式)
+    "zone_fill_alpha": 0.3  # 报警区域填充透明度 (0.0-1.0)
 }
 
 # 模型和视频路径管理
@@ -337,15 +352,41 @@ def load_display_config():
                     display_config['box_thickness'] = config['box_thickness']
                 if 'text_color' in config:
                     display_config['text_color'] = config['text_color']
+                if 'use_chinese' in config:
+                    display_config['use_chinese'] = config['use_chinese']
+                if 'zone_fill_color' in config:
+                    display_config['zone_fill_color'] = config['zone_fill_color']
+                if 'zone_border_color' in config:
+                    display_config['zone_border_color'] = config['zone_border_color']
+                if 'zone_fill_alpha' in config:
+                    display_config['zone_fill_alpha'] = config['zone_fill_alpha']
                 backend_logger.info(f"已从 {display_config_file} 加载显示配置")
+                backend_logger.info(f"报警区域颜色配置: fill={display_config.get('zone_fill_color')}, border={display_config.get('zone_border_color')}, alpha={display_config.get('zone_fill_alpha')}")
         except Exception as e:
             backend_logger.error(f"加载显示配置文件失败: {e}")
+    else:
+        # 如果配置文件不存在，确保默认值存在
+        if 'zone_fill_color' not in display_config:
+            display_config['zone_fill_color'] = [0, 255, 255]
+        if 'zone_border_color' not in display_config:
+            display_config['zone_border_color'] = [0, 255, 255]
+        if 'zone_fill_alpha' not in display_config:
+            display_config['zone_fill_alpha'] = 0.3
 
 def save_display_config():
     """保存显示配置到文件"""
     try:
+        # 确保所有必需的字段都存在（使用默认值）
+        config_to_save = display_config.copy()
+        if 'zone_fill_color' not in config_to_save:
+            config_to_save['zone_fill_color'] = [0, 255, 255]  # BGR格式，默认青色
+        if 'zone_border_color' not in config_to_save:
+            config_to_save['zone_border_color'] = [0, 255, 255]  # BGR格式，默认青色
+        if 'zone_fill_alpha' not in config_to_save:
+            config_to_save['zone_fill_alpha'] = 0.3
+        
         with open(display_config_file, 'w', encoding='utf-8') as f:
-            json.dump(display_config, f, indent=2, ensure_ascii=False)
+            json.dump(config_to_save, f, indent=2, ensure_ascii=False)
         backend_logger.info(f"显示配置已保存到 {display_config_file}")
     except Exception as e:
         backend_logger.error(f"保存显示配置失败: {e}")
@@ -533,7 +574,7 @@ def video_reader():
 
 def detection_worker():
     """检测工作线程"""
-    global latest_frame, latest_results, polygon_points, polygon_defined, fps_counter
+    global latest_frame, latest_results, polygon_points, polygon_defined, fps_counter, display_config
     
     while not stop_flag.is_set():
         try:
@@ -619,10 +660,31 @@ def detection_worker():
                             if check_confidence(cls_id, conf):
                                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                                 track_id = int(track_ids[i])
+                                bbox_center = [(x1 + x2) / 2, (y1 + y2) / 2]
                                 
-                                # 绘制检测框（使用配置的颜色和粗细）
+                                # 判断是否在报警区域内
+                                in_zone = False
+                                if polygon_defined:
+                                    detection_mode = alarm_config.get('detection_mode', 'center')
+                                    if detection_mode == 'center':
+                                        # 中心点模式：检查中心点是否在多边形内
+                                        in_zone = is_point_in_polygon(bbox_center, polygon_points)
+                                    elif detection_mode == 'edge':
+                                        # 边框任意点模式：检查检测框是否与多边形有交集
+                                        in_zone = is_bbox_in_polygon([x1, y1, x2, y2], polygon_points)
+                                
+                                # 绘制检测框（在区域内用红色，否则用配置的颜色）
                                 x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                                box_color = tuple(display_config['box_color'])
+                                if in_zone:
+                                    # 在报警区域内：使用红色 (BGR格式: 0, 0, 255)
+                                    box_color = (0, 0, 255)
+                                    # 文字颜色也使用红色 (RGB格式: 255, 0, 0)
+                                    text_color_rgb = (255, 0, 0)
+                                else:
+                                    # 不在区域内：使用配置的默认颜色
+                                    box_color = tuple(display_config['box_color'])
+                                    # 文字颜色使用配置的颜色
+                                    text_color_rgb = tuple(display_config['text_color'])
                                 box_thickness = display_config['box_thickness']
                                 cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), box_color, box_thickness)
                                 
@@ -665,9 +727,8 @@ def detection_worker():
                                     text_width = bbox[2] - bbox[0]
                                     text_height = bbox[3] - bbox[1]
                                     
-                                    # 在PIL图像上绘制文字（使用配置的颜色）
-                                    text_color = tuple(display_config['text_color'])
-                                    draw.text((x1 + 2, y1 - text_height - 3), label, fill=text_color, font=font)
+                                    # 在PIL图像上绘制文字（根据是否在报警区域内使用不同颜色）
+                                    draw.text((x1 + 2, y1 - text_height - 3), label, fill=text_color_rgb, font=font)
                                     
                                     # 将PIL图像转换回OpenCV格式
                                     annotated_frame = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
@@ -676,8 +737,8 @@ def detection_worker():
                                     class_name_en = model_classes[cls_id] if cls_id < len(model_classes) else f"class_{cls_id}"
                                     label = f"{class_name_en} {conf:.2f} ID:{track_id}"
                                     
-                                    # 使用OpenCV绘制文字（BGR格式）
-                                    text_color_bgr = tuple(reversed(display_config['text_color']))  # RGB转BGR
+                                    # 使用OpenCV绘制文字（需要转换为BGR格式）
+                                    text_color_bgr = (text_color_rgb[2], text_color_rgb[1], text_color_rgb[0])  # RGB转BGR
                                     font_scale = display_config['font_size'] / 20.0  # 调整字体大小比例
                                     cv2.putText(annotated_frame, label, (x1 + 2, y1 - 5), 
                                                cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color_bgr, 2)
@@ -685,10 +746,28 @@ def detection_worker():
             # 绘制多边形区域
             if polygon_defined and len(polygon_points) >= 3:
                 polygon_array = np.array(polygon_points, np.int32)
+                
+                # 先绘制边框（在填充之前，确保边框可见）
+                zone_border_color_list = display_config.get('zone_border_color', [0, 255, 255])
+                # 确保颜色值是整数元组
+                zone_border_color = (int(zone_border_color_list[0]), int(zone_border_color_list[1]), int(zone_border_color_list[2]))
+                cv2.polylines(annotated_frame, [polygon_array], True, zone_border_color, 3)
+                
+                # 再绘制填充
                 overlay = annotated_frame.copy()
-                cv2.fillPoly(overlay, [polygon_array], (0, 255, 255))
-                cv2.addWeighted(overlay, 0.3, annotated_frame, 0.7, 0, annotated_frame)
-                cv2.polylines(annotated_frame, [polygon_array], True, (0, 255, 255), 2)
+                # 使用配置的填充颜色（直接从display_config读取，不使用默认值）
+                zone_fill_color_list = display_config.get('zone_fill_color', [0, 255, 255])
+                zone_fill_alpha = display_config.get('zone_fill_alpha', 0.3)
+                # 确保颜色值是整数元组
+                zone_fill_color = (int(zone_fill_color_list[0]), int(zone_fill_color_list[1]), int(zone_fill_color_list[2]))
+                cv2.fillPoly(overlay, [polygon_array], zone_fill_color)
+                cv2.addWeighted(overlay, zone_fill_alpha, annotated_frame, 1.0 - zone_fill_alpha, 0, annotated_frame)
+                
+                # 调试日志（每100帧输出一次，避免日志过多）
+                if got_new_frame:
+                    frame_count = fps_counter.get("frame_count", 0)
+                    if frame_count % 100 == 0:
+                        backend_logger.info(f"绘制报警区域 - 填充颜色: {zone_fill_color}, 边框颜色: {zone_border_color}, 透明度: {zone_fill_alpha}, display_config中的值: fill={display_config.get('zone_fill_color')}, border={display_config.get('zone_border_color')}, alpha={display_config.get('zone_fill_alpha')}")
             
             # 编码为JPEG
             _, buffer = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -801,7 +880,18 @@ load_polygon_config()
 @app.route('/')
 def index():
     """返回前端页面"""
-    return send_from_directory(FRONTEND_DIR, 'index.html')
+    if VITE_DEV_MODE:
+        # 开发模式：重定向到 Vite 开发服务器
+        from flask import redirect, request
+        # 获取请求的主机名，保持协议和端口
+        frontend_url = os.environ.get('VITE_FRONTEND_URL', f"http://{request.host.split(':')[0]}:5173")
+        return redirect(frontend_url)
+    else:
+        # 生产模式：提供构建后的静态文件
+        if os.path.exists(os.path.join(FRONTEND_DIST_DIR, 'index.html')):
+            return send_from_directory(FRONTEND_DIST_DIR, 'index.html')
+        else:
+            return send_from_directory(FRONTEND_DIR, 'index.html')
 
 
 # REST API 路由
@@ -1077,7 +1167,21 @@ def set_confidence_threshold():
 @app.route('/api/display', methods=['GET'])
 def get_display_config():
     """获取显示配置"""
-    return jsonify(display_config)
+    # 返回给前端时，需要将BGR转换为RGB
+    config = display_config.copy()
+    if 'box_color' in config:
+        # BGR -> RGB 转换
+        bgr_color = config['box_color']
+        config['box_color'] = [bgr_color[2], bgr_color[1], bgr_color[0]]
+    if 'zone_fill_color' in config:
+        # BGR -> RGB 转换
+        bgr_color = config['zone_fill_color']
+        config['zone_fill_color'] = [bgr_color[2], bgr_color[1], bgr_color[0]]
+    if 'zone_border_color' in config:
+        # BGR -> RGB 转换
+        bgr_color = config['zone_border_color']
+        config['zone_border_color'] = [bgr_color[2], bgr_color[1], bgr_color[0]]
+    return jsonify(config)
 
 
 @app.route('/api/display', methods=['POST'])
@@ -1100,7 +1204,8 @@ def set_display_config():
                 return jsonify({"success": False, "message": "边框颜色必须是RGB格式的数组，如[0,255,0]"}), 400
             if not all(0 <= c <= 255 for c in box_color):
                 return jsonify({"success": False, "message": "颜色值必须在0-255之间"}), 400
-            display_config['box_color'] = box_color
+            # 前端发送的是RGB格式，需要转换为BGR格式（OpenCV使用BGR）
+            display_config['box_color'] = [box_color[2], box_color[1], box_color[0]]  # RGB -> BGR
         
         if 'box_thickness' in data:
             box_thickness = int(data['box_thickness'])
@@ -1122,11 +1227,54 @@ def set_display_config():
                 return jsonify({"success": False, "message": "use_chinese必须是布尔值"}), 400
             display_config['use_chinese'] = use_chinese
         
+        if 'zone_fill_color' in data:
+            zone_fill_color = data['zone_fill_color']
+            if not isinstance(zone_fill_color, list) or len(zone_fill_color) != 3:
+                return jsonify({"success": False, "message": "报警区域填充颜色必须是RGB格式的数组，如[0,255,255]"}), 400
+            if not all(0 <= c <= 255 for c in zone_fill_color):
+                return jsonify({"success": False, "message": "颜色值必须在0-255之间"}), 400
+            # 前端发送的是RGB格式，需要转换为BGR格式（OpenCV使用BGR）
+            display_config['zone_fill_color'] = [int(zone_fill_color[2]), int(zone_fill_color[1]), int(zone_fill_color[0])]  # RGB -> BGR
+            backend_logger.info(f"报警区域填充颜色已更新: RGB={zone_fill_color} -> BGR={display_config['zone_fill_color']}")
+        
+        if 'zone_border_color' in data:
+            zone_border_color = data['zone_border_color']
+            if not isinstance(zone_border_color, list) or len(zone_border_color) != 3:
+                return jsonify({"success": False, "message": "报警区域边框颜色必须是RGB格式的数组，如[0,255,255]"}), 400
+            if not all(0 <= c <= 255 for c in zone_border_color):
+                return jsonify({"success": False, "message": "颜色值必须在0-255之间"}), 400
+            # 前端发送的是RGB格式，需要转换为BGR格式（OpenCV使用BGR）
+            display_config['zone_border_color'] = [int(zone_border_color[2]), int(zone_border_color[1]), int(zone_border_color[0])]  # RGB -> BGR
+            backend_logger.info(f"报警区域边框颜色已更新: RGB={zone_border_color} -> BGR={display_config['zone_border_color']}")
+        
+        if 'zone_fill_alpha' in data:
+            zone_fill_alpha = float(data['zone_fill_alpha'])
+            if zone_fill_alpha < 0.0 or zone_fill_alpha > 1.0:
+                return jsonify({"success": False, "message": "透明度必须在0.0-1.0之间"}), 400
+            display_config['zone_fill_alpha'] = zone_fill_alpha
+            backend_logger.info(f"报警区域填充透明度已更新: {zone_fill_alpha}")
+        
         save_display_config()
+        
+        # 返回给前端时，需要将BGR转换为RGB
+        response_config = display_config.copy()
+        if 'box_color' in response_config:
+            # BGR -> RGB 转换
+            bgr_color = response_config['box_color']
+            response_config['box_color'] = [bgr_color[2], bgr_color[1], bgr_color[0]]
+        if 'zone_fill_color' in response_config:
+            # BGR -> RGB 转换
+            bgr_color = response_config['zone_fill_color']
+            response_config['zone_fill_color'] = [bgr_color[2], bgr_color[1], bgr_color[0]]
+        if 'zone_border_color' in response_config:
+            # BGR -> RGB 转换
+            bgr_color = response_config['zone_border_color']
+            response_config['zone_border_color'] = [bgr_color[2], bgr_color[1], bgr_color[0]]
+        
         return jsonify({
             "success": True,
             "message": "显示配置已更新",
-            "config": display_config
+            "config": response_config
         })
     except ValueError:
         return jsonify({"success": False, "message": "参数格式错误"}), 400

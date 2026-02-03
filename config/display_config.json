@@ -1,15 +1,26 @@
 {
   "font_size": 28,
   "box_color": [
-    0,
-    115,
-    255
+    14,
+    245,
+    91
   ],
   "box_thickness": 7,
   "text_color": [
-    160,
-    24,
-    24
+    255,
+    0,
+    183
   ],
-  "use_chinese": false
+  "use_chinese": true,
+  "zone_fill_color": [
+    28,
+    53,
+    218
+  ],
+  "zone_border_color": [
+    11,
+    55,
+    234
+  ],
+  "zone_fill_alpha": 0.7
 }
