@@ -26,10 +26,8 @@
         :type="isDrawing ? 'warning' : 'primary'"
         @click="toggleDrawing"
       >
-        {{ isDrawing ? '取消绘制 (ESC)' : '绘制监控区域' }}
+        {{ isDrawing ? '取消绘制 (ESC)' : '新建区域' }}
       </el-button>
-      <el-button @click="clearPolygon">清除区域</el-button>
-      <el-button type="success" @click="savePolygon">保存区域</el-button>
     </div>
   </el-card>
 </template>
@@ -40,13 +38,13 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import axios from 'axios'
 
 const props = defineProps({
-  polygon: {
+  zones: {
     type: Array,
     default: () => []
   }
 })
 
-const emit = defineEmits(['polygon-updated'])
+const emit = defineEmits(['zones-updated'])
 
 const containerRef = ref(null)
 const videoCanvasRef = ref(null)
@@ -57,6 +55,7 @@ let drawCtx = null
 
 const isDrawing = ref(false)
 const polygonPoints = ref([])
+const editingZoneId = ref(null)  // 正在编辑的区域ID
 const mouseX = ref(0)
 const mouseY = ref(0)
 const fps = ref(0)
@@ -84,7 +83,7 @@ onMounted(() => {
     resizeCanvases()
     window.addEventListener('resize', resizeCanvases)
     window.addEventListener('keydown', handleKeyPress)
-    loadPolygon()
+    loadZones()
     loadDisplayConfig()
     
     console.log('VideoPanel 已初始化')
@@ -98,16 +97,16 @@ onUnmounted(() => {
   window.removeEventListener('keydown', handleKeyPress)
 })
 
-watch(() => props.polygon, (newPolygon) => {
-  if (!isDrawing.value && newPolygon && newPolygon.length >= 3) {
-    drawPolygonOnCanvas(newPolygon)
+watch(() => props.zones, (newZones) => {
+  if (!isDrawing.value) {
+    drawAllZones()
   }
 }, { deep: true })
 
 // 监听颜色配置变化，自动重新绘制
 watch([zoneFillColor, zoneBorderColor, zoneFillAlpha], () => {
-  if (!isDrawing.value && props.polygon && props.polygon.length >= 3) {
-    drawPolygonOnCanvas(props.polygon)
+  if (!isDrawing.value) {
+    drawAllZones()
   }
 }, { deep: true })
 
@@ -122,9 +121,7 @@ const resizeCanvases = () => {
   drawCanvasRef.value.width = width
   drawCanvasRef.value.height = height
   
-  if (props.polygon && props.polygon.length >= 3) {
-    drawPolygonOnCanvas(props.polygon)
-  }
+  drawAllZones()
 }
 
 const updateFrame = (data) => {
@@ -144,6 +141,8 @@ const updateFrame = (data) => {
       if (videoWidth !== img.width || videoHeight !== img.height) {
         videoWidth = img.width
         videoHeight = img.height
+        // 视频尺寸变化时重新绘制区域
+        drawAllZones()
       }
     } catch (error) {
       console.error('绘制视频帧失败:', error)
@@ -175,44 +174,68 @@ const rgbToRgba = (rgb, alpha) => {
   return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`
 }
 
-const drawPolygonOnCanvas = (points) => {
-  if (!drawCtx || !points || points.length < 3) return
+const drawAllZones = () => {
+  if (!drawCtx) return
   
   drawCtx.clearRect(0, 0, drawCanvasRef.value.width, drawCanvasRef.value.height)
+  
+  if (!props.zones || props.zones.length === 0) return
+  if (videoWidth === 0 || videoHeight === 0) return
   
   const scaleX = drawCanvasRef.value.width / videoWidth
   const scaleY = drawCanvasRef.value.height / videoHeight
   
-  // 使用配置的边框颜色
-  const borderHex = rgbToHex(zoneBorderColor.value[0], zoneBorderColor.value[1], zoneBorderColor.value[2])
-  drawCtx.strokeStyle = borderHex
-  drawCtx.lineWidth = 3
-  
-  // 使用配置的填充颜色和透明度
-  drawCtx.fillStyle = rgbToRgba(zoneFillColor.value, zoneFillAlpha.value)
-  
-  drawCtx.beginPath()
-  points.forEach((point, index) => {
-    const x = point[0] * scaleX
-    const y = point[1] * scaleY
-    if (index === 0) {
-      drawCtx.moveTo(x, y)
-    } else {
-      drawCtx.lineTo(x, y)
-    }
-  })
-  drawCtx.closePath()
-  drawCtx.fill()
-  drawCtx.stroke()
-  
-  // 绘制顶点，使用边框颜色
-  points.forEach(point => {
-    const x = point[0] * scaleX
-    const y = point[1] * scaleY
-    drawCtx.fillStyle = borderHex
+  // 绘制所有启用的区域
+  props.zones.forEach(zone => {
+    if (!zone.enabled || !zone.points || zone.points.length < 3) return
+    
+    // 获取区域颜色（优先使用区域自己的颜色）
+    const zoneColor = zone.color || {}
+    const fillColor = zoneColor.fill || zoneFillColor.value
+    const borderColor = zoneColor.border || zoneBorderColor.value
+    const alpha = zoneFillAlpha.value
+    
+    const borderHex = rgbToHex(borderColor[0], borderColor[1], borderColor[2])
+    drawCtx.strokeStyle = borderHex
+    drawCtx.lineWidth = 3
+    
+    // 使用区域的填充颜色和透明度
+    drawCtx.fillStyle = rgbToRgba(fillColor, alpha)
+    
     drawCtx.beginPath()
-    drawCtx.arc(x, y, 5, 0, Math.PI * 2)
+    zone.points.forEach((point, index) => {
+      const x = point[0] * scaleX
+      const y = point[1] * scaleY
+      if (index === 0) {
+        drawCtx.moveTo(x, y)
+      } else {
+        drawCtx.lineTo(x, y)
+      }
+    })
+    drawCtx.closePath()
     drawCtx.fill()
+    drawCtx.stroke()
+    
+    // 绘制区域名称
+    if (zone.name) {
+      const centerX = zone.points.reduce((sum, p) => sum + p[0], 0) / zone.points.length * scaleX
+      const centerY = zone.points.reduce((sum, p) => sum + p[1], 0) / zone.points.length * scaleY
+      
+      drawCtx.fillStyle = borderHex
+      drawCtx.font = 'bold 14px Arial'
+      drawCtx.textAlign = 'center'
+      drawCtx.textBaseline = 'middle'
+      
+      // 绘制文字背景
+      const textWidth = drawCtx.measureText(zone.name).width
+      const padding = 5
+      drawCtx.fillStyle = 'rgba(0, 0, 0, 0.7)'
+      drawCtx.fillRect(centerX - textWidth / 2 - padding, centerY - 10 - padding, textWidth + padding * 2, 20 + padding * 2)
+      
+      // 绘制文字
+      drawCtx.fillStyle = borderHex
+      drawCtx.fillText(zone.name, centerX, centerY)
+    }
   })
 }
 
@@ -224,18 +247,20 @@ const toggleDrawing = () => {
   }
 }
 
-const startDrawing = () => {
+const startDrawing = (zone = null) => {
   isDrawing.value = true
   polygonPoints.value = []
+  editingZoneId.value = zone ? zone.id : null
 }
 
 const cancelDrawing = () => {
   isDrawing.value = false
   polygonPoints.value = []
-  drawCtx.clearRect(0, 0, drawCanvasRef.value.width, drawCanvasRef.value.height)
+  editingZoneId.value = null
+  drawAllZones()
 }
 
-const finishDrawing = () => {
+const finishDrawing = async () => {
   if (polygonPoints.value.length < 3) {
     ElMessage.warning('至少需要3个顶点才能形成多边形')
     return
@@ -249,7 +274,14 @@ const finishDrawing = () => {
     point[1] * scaleY
   ])
   
-  savePolygonToServer(videoPolygon)
+  if (editingZoneId.value) {
+    // 更新现有区域
+    await updateZoneToServer(editingZoneId.value, videoPolygon)
+  } else {
+    // 创建新区域
+    await createZoneToServer(videoPolygon)
+  }
+  
   cancelDrawing()
 }
 
@@ -290,6 +322,42 @@ const drawPolygonPreview = () => {
   if (!drawCtx) return
   
   drawCtx.clearRect(0, 0, drawCanvasRef.value.width, drawCanvasRef.value.height)
+  
+  // 先绘制已存在的区域（半透明）
+  if (props.zones && props.zones.length > 0 && videoWidth > 0 && videoHeight > 0) {
+    const scaleX = drawCanvasRef.value.width / videoWidth
+    const scaleY = drawCanvasRef.value.height / videoHeight
+    
+    props.zones.forEach(zone => {
+      if (!zone.enabled || !zone.points || zone.points.length < 3) return
+      
+      const zoneColor = zone.color || {}
+      const fillColor = zoneColor.fill || zoneFillColor.value
+      const borderColor = zoneColor.border || zoneBorderColor.value
+      
+      const borderHex = rgbToHex(borderColor[0], borderColor[1], borderColor[2])
+      drawCtx.strokeStyle = borderHex
+      drawCtx.lineWidth = 2
+      drawCtx.globalAlpha = 0.3
+      
+      drawCtx.fillStyle = rgbToRgba(fillColor, 0.2)
+      
+      drawCtx.beginPath()
+      zone.points.forEach((point, index) => {
+        const x = point[0] * scaleX
+        const y = point[1] * scaleY
+        if (index === 0) {
+          drawCtx.moveTo(x, y)
+        } else {
+          drawCtx.lineTo(x, y)
+        }
+      })
+      drawCtx.closePath()
+      drawCtx.fill()
+      drawCtx.stroke()
+      drawCtx.globalAlpha = 1.0
+    })
+  }
   
   if (polygonPoints.value.length === 0) {
     drawCtx.fillStyle = '#00FF00'
@@ -412,14 +480,14 @@ const handleKeyPress = (event) => {
   }
 }
 
-const loadPolygon = async () => {
+const loadZones = async () => {
   try {
-    const res = await axios.get('/api/polygon')
-    if (res.data.defined && res.data.polygon.length >= 3) {
-      emit('polygon-updated', res.data.polygon)
+    const res = await axios.get('/api/zones')
+    if (res.data.zones) {
+      emit('zones-updated', res.data.zones)
     }
   } catch (error) {
-    console.error('加载多边形失败:', error)
+    console.error('加载区域失败:', error)
   }
 }
 
@@ -437,59 +505,58 @@ const loadDisplayConfig = async () => {
     if (res.data.zone_fill_alpha !== undefined) {
       zoneFillAlpha.value = res.data.zone_fill_alpha
     }
-    // 如果多边形已存在，重新绘制以应用新颜色
-    if (props.polygon && props.polygon.length >= 3) {
-      drawPolygonOnCanvas(props.polygon)
-    }
+    // 如果区域已存在，重新绘制以应用新颜色
+    drawAllZones()
   } catch (error) {
     console.error('加载显示配置失败:', error)
   }
 }
 
-const savePolygonToServer = async (polygon) => {
+const createZoneToServer = async (points) => {
   try {
-    const res = await axios.post('/api/polygon', { polygon })
+    const res = await axios.post('/api/zones', {
+      points: points,
+      name: `区域${props.zones.length + 1}`,
+      enabled: true,
+      color: {
+        fill: zoneFillColor.value,
+        border: zoneBorderColor.value
+      }
+    })
     if (res.data.success) {
-      ElMessage.success('多边形区域已保存')
-      emit('polygon-updated', polygon)
+      ElMessage.success('区域已创建')
+      await loadZones()
     } else {
-      ElMessage.error('保存失败: ' + res.data.message)
+      ElMessage.error('创建失败: ' + res.data.message)
     }
   } catch (error) {
-    console.error('保存失败:', error)
-    ElMessage.error('保存失败，请检查网络连接')
+    console.error('创建失败:', error)
+    ElMessage.error('创建失败，请检查网络连接')
   }
 }
 
-const clearPolygon = async () => {
+const updateZoneToServer = async (zoneId, points) => {
   try {
-    await ElMessageBox.confirm('确定要清除监控区域吗？', '确认清除', { type: 'warning' })
-    
-    const res = await axios.delete('/api/polygon')
+    const res = await axios.put(`/api/zones/${zoneId}`, {
+      points: points
+    })
     if (res.data.success) {
-      ElMessage.success('监控区域已清除')
-      emit('polygon-updated', [])
+      ElMessage.success('区域已更新')
+      await loadZones()
+    } else {
+      ElMessage.error('更新失败: ' + res.data.message)
     }
   } catch (error) {
-    if (error !== 'cancel') {
-      console.error('清除失败:', error)
-      ElMessage.error('清除失败')
-    }
-  }
-}
-
-const savePolygon = async () => {
-  if (props.polygon && props.polygon.length >= 3) {
-    await savePolygonToServer(props.polygon)
-  } else {
-    ElMessage.warning('请先绘制监控区域')
+    console.error('更新失败:', error)
+    ElMessage.error('更新失败，请检查网络连接')
   }
 }
 
 // 暴露方法给父组件（必须在所有函数定义之后）
 defineExpose({
   updateFrame,
-  reloadDisplayConfig: loadDisplayConfig  // 暴露重新加载显示配置的方法
+  reloadDisplayConfig: loadDisplayConfig,  // 暴露重新加载显示配置的方法
+  startDrawing  // 暴露开始绘制方法
 })
 </script>
 

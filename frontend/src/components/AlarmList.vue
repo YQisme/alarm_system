@@ -7,7 +7,9 @@
         <div class="alarm-info">
           <span class="object-name">{{ alarm.object_name || alarm.class_name_cn || '对象' }}</span>
           <span class="person-id"> ID: {{ alarm.track_id !== undefined ? alarm.track_id : alarm.person_id }}</span>
-          <span> 进入监控区域</span>
+          <span> 进入</span>
+          <span class="zone-name" v-if="alarm.zone_name">【{{ alarm.zone_name }}】</span>
+          <span v-else>监控区域</span>
           <br>
           <span class="alarm-position">位置: ({{ alarm.position.x.toFixed(0) }}, {{ alarm.position.y.toFixed(0) }})</span>
         </div>
@@ -75,6 +77,11 @@ defineProps({
 .alarm-position {
   font-size: 12px;
   color: #909399;
+}
+
+.zone-name {
+  font-weight: 600;
+  color: #67c23a;
 }
 </style>
 

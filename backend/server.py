@@ -91,9 +91,10 @@ def check_gpu_available():
 
 # 初始化时检测GPU
 gpu_available, device = check_gpu_available()
-polygon_points = []  # 多边形顶点列表
-polygon_defined = False  # 多边形是否已定义
-alarm_triggered = {}  # 记录已触发报警的跟踪ID
+# 多区域管理：每个区域包含 id, name, points, enabled, color
+zones = []  # 区域列表，格式：[{"id": "uuid", "name": "区域1", "points": [[x,y],...], "enabled": True, "color": {"fill": [0,255,255], "border": [0,255,255]}}, ...]
+next_zone_id = 1  # 下一个区域ID（用于生成唯一ID）
+alarm_triggered = {}  # 记录已触发报警的跟踪ID，格式：{(track_id, class_id, zone_id): timestamp}
 
 # 报警配置
 alarm_config = {
@@ -102,7 +103,7 @@ alarm_config = {
     "once_per_id": False  # 相同ID是否只报警一次（True=整个生命周期只报警一次，False=允许重复报警）
 }
 
-polygon_config_file = os.path.join(CONFIG_DIR, "polygon_zone.json")  # 多边形区域配置文件
+zones_config_file = os.path.join(CONFIG_DIR, "zones_config.json")  # 多区域配置文件
 config_file = os.path.join(CONFIG_DIR, "system_config.json")  # 系统配置文件
 classes_config_file = os.path.join(CONFIG_DIR, "classes_config.json")  # 类别配置文件
 display_config_file = os.path.join(CONFIG_DIR, "display_config.json")  # 显示配置文件
@@ -461,13 +462,13 @@ def is_bbox_in_polygon(bbox, polygon):
     return False
 
 
-def trigger_alarm(track_id, bbox_center, class_id=None, class_name_cn=None):
+def trigger_alarm(track_id, bbox_center, zone_id, zone_name, class_id=None, class_name_cn=None):
     """触发报警"""
     global alarm_triggered, alarm_config
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # 使用 (track_id, class_id) 作为唯一标识，避免不同类别的相同ID冲突
-    alarm_key = f"{track_id}_{class_id}" if class_id is not None else str(track_id)
+    # 使用 (track_id, class_id, zone_id) 作为唯一标识，避免不同类别和区域的相同ID冲突
+    alarm_key = (track_id, class_id if class_id is not None else -1, zone_id)
     
     # 检查是否已报警过（如果配置了相同ID只报警一次）
     once_per_id = alarm_config.get('once_per_id', False)
@@ -497,12 +498,14 @@ def trigger_alarm(track_id, bbox_center, class_id=None, class_name_cn=None):
         "class_id": class_id,
         "class_name_cn": class_name_cn,
         "object_name": object_name,
+        "zone_id": zone_id,
+        "zone_name": zone_name,
         "position": {"x": float(bbox_center[0]), "y": float(bbox_center[1])}
     }
     
     # 通过WebSocket发送报警信息
     socketio.emit('alarm', alarm_data)
-    backend_logger.warning(f"⚠️  报警！{object_name}进入监控区域！时间: {current_time}, ID: {track_id}")
+    backend_logger.warning(f"⚠️  报警！{object_name}进入监控区域【{zone_name}】！时间: {current_time}, ID: {track_id}")
     return True
 
 
@@ -574,7 +577,7 @@ def video_reader():
 
 def detection_worker():
     """检测工作线程"""
-    global latest_frame, latest_results, polygon_points, polygon_defined, fps_counter, display_config
+    global latest_frame, latest_results, zones, fps_counter, display_config
     
     while not stop_flag.is_set():
         try:
@@ -601,7 +604,7 @@ def detection_worker():
                         time.sleep(0.1)
                         continue
                     # 在使用时指定设备，stream=True返回生成器，需要获取第一个结果
-                    results_generator = model.track(frame, persist=True, stream=True, device=device)
+                    results_generator = model.track(frame, persist=True, stream=True, device=device,classes=[0])
                     results = next(results_generator)  # 从生成器中获取结果
                 latest_results = results
             except Exception as e:
@@ -609,8 +612,9 @@ def detection_worker():
                 time.sleep(0.1)
                 continue
             
-            # 如果多边形已定义，检测对象是否进入区域
-            if polygon_defined and len(polygon_points) >= 3:
+            # 检测对象是否进入任何启用的区域
+            enabled_zones = [z for z in zones if z.get('enabled', True) and len(z.get('points', [])) >= 3]
+            if enabled_zones:
                 if results.boxes is not None and len(results.boxes) > 0:
                     boxes = results.boxes
                     track_ids = results.boxes.id
@@ -627,20 +631,28 @@ def detection_worker():
                                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                                     bbox_center = [(x1 + x2) / 2, (y1 + y2) / 2]
                                     
-                                    # 根据配置的检测模式判断是否进入区域
+                                    # 检测是否进入任何启用的区域
                                     detection_mode = alarm_config.get('detection_mode', 'center')
-                                    in_zone = False
-                                    if detection_mode == 'center':
-                                        # 中心点模式：检查中心点是否在多边形内
-                                        in_zone = is_point_in_polygon(bbox_center, polygon_points)
-                                    elif detection_mode == 'edge':
-                                        # 边框任意点模式：检查检测框是否与多边形有交集
-                                        in_zone = is_bbox_in_polygon([x1, y1, x2, y2], polygon_points)
-                                    
-                                    if in_zone:
-                                        track_id = int(track_ids[i])
-                                        class_name_cn = get_class_name_cn(cls_id)
-                                        trigger_alarm(track_id, bbox_center, cls_id, class_name_cn)
+                                    for zone in enabled_zones:
+                                        zone_points = zone.get('points', [])
+                                        if len(zone_points) < 3:
+                                            continue
+                                        
+                                        in_zone = False
+                                        if detection_mode == 'center':
+                                            # 中心点模式：检查中心点是否在多边形内
+                                            in_zone = is_point_in_polygon(bbox_center, zone_points)
+                                        elif detection_mode == 'edge':
+                                            # 边框任意点模式：检查检测框是否与多边形有交集
+                                            in_zone = is_bbox_in_polygon([x1, y1, x2, y2], zone_points)
+                                        
+                                        if in_zone:
+                                            track_id = int(track_ids[i])
+                                            class_name_cn = get_class_name_cn(cls_id)
+                                            zone_id = zone.get('id', 'unknown')
+                                            zone_name = zone.get('name', '未知区域')
+                                            trigger_alarm(track_id, bbox_center, zone_id, zone_name, cls_id, class_name_cn)
+                                            break  # 只对第一个匹配的区域报警
             
             # 手动绘制检测框（只显示启用的类别）
             annotated_frame = frame.copy()
@@ -662,16 +674,25 @@ def detection_worker():
                                 track_id = int(track_ids[i])
                                 bbox_center = [(x1 + x2) / 2, (y1 + y2) / 2]
                                 
-                                # 判断是否在报警区域内
+                                # 判断是否在任何一个启用的报警区域内
                                 in_zone = False
-                                if polygon_defined:
+                                enabled_zones = [z for z in zones if z.get('enabled', True) and len(z.get('points', [])) >= 3]
+                                if enabled_zones:
                                     detection_mode = alarm_config.get('detection_mode', 'center')
-                                    if detection_mode == 'center':
-                                        # 中心点模式：检查中心点是否在多边形内
-                                        in_zone = is_point_in_polygon(bbox_center, polygon_points)
-                                    elif detection_mode == 'edge':
-                                        # 边框任意点模式：检查检测框是否与多边形有交集
-                                        in_zone = is_bbox_in_polygon([x1, y1, x2, y2], polygon_points)
+                                    for zone in enabled_zones:
+                                        zone_points = zone.get('points', [])
+                                        if len(zone_points) < 3:
+                                            continue
+                                        if detection_mode == 'center':
+                                            # 中心点模式：检查中心点是否在多边形内
+                                            if is_point_in_polygon(bbox_center, zone_points):
+                                                in_zone = True
+                                                break
+                                        elif detection_mode == 'edge':
+                                            # 边框任意点模式：检查检测框是否与多边形有交集
+                                            if is_bbox_in_polygon([x1, y1, x2, y2], zone_points):
+                                                in_zone = True
+                                                break
                                 
                                 # 绘制检测框（在区域内用红色，否则用配置的颜色）
                                 x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
@@ -743,31 +764,78 @@ def detection_worker():
                                     cv2.putText(annotated_frame, label, (x1 + 2, y1 - 5), 
                                                cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color_bgr, 2)
             
-            # 绘制多边形区域
-            if polygon_defined and len(polygon_points) >= 3:
-                polygon_array = np.array(polygon_points, np.int32)
+            # 绘制所有启用的区域
+            enabled_zones = [z for z in zones if z.get('enabled', True) and len(z.get('points', [])) >= 3]
+            for zone in enabled_zones:
+                zone_points = zone.get('points', [])
+                if len(zone_points) < 3:
+                    continue
                 
-                # 先绘制边框（在填充之前，确保边框可见）
-                zone_border_color_list = display_config.get('zone_border_color', [0, 255, 255])
-                # 确保颜色值是整数元组
-                zone_border_color = (int(zone_border_color_list[0]), int(zone_border_color_list[1]), int(zone_border_color_list[2]))
-                cv2.polylines(annotated_frame, [polygon_array], True, zone_border_color, 3)
+                polygon_array = np.array(zone_points, np.int32)
                 
-                # 再绘制填充
-                overlay = annotated_frame.copy()
-                # 使用配置的填充颜色（直接从display_config读取，不使用默认值）
-                zone_fill_color_list = display_config.get('zone_fill_color', [0, 255, 255])
+                # 获取区域的颜色配置（优先使用区域自己的颜色，否则使用全局配置）
+                zone_color = zone.get('color', {})
+                zone_border_color_list = zone_color.get('border', display_config.get('zone_border_color', [0, 255, 255]))
+                zone_fill_color_list = zone_color.get('fill', display_config.get('zone_fill_color', [0, 255, 255]))
                 zone_fill_alpha = display_config.get('zone_fill_alpha', 0.3)
-                # 确保颜色值是整数元组
+                
+                # 确保颜色值是整数元组（BGR格式）
+                zone_border_color = (int(zone_border_color_list[0]), int(zone_border_color_list[1]), int(zone_border_color_list[2]))
                 zone_fill_color = (int(zone_fill_color_list[0]), int(zone_fill_color_list[1]), int(zone_fill_color_list[2]))
+                
+                # 先绘制填充
+                overlay = annotated_frame.copy()
                 cv2.fillPoly(overlay, [polygon_array], zone_fill_color)
                 cv2.addWeighted(overlay, zone_fill_alpha, annotated_frame, 1.0 - zone_fill_alpha, 0, annotated_frame)
                 
-                # 调试日志（每100帧输出一次，避免日志过多）
-                if got_new_frame:
-                    frame_count = fps_counter.get("frame_count", 0)
-                    if frame_count % 100 == 0:
-                        backend_logger.info(f"绘制报警区域 - 填充颜色: {zone_fill_color}, 边框颜色: {zone_border_color}, 透明度: {zone_fill_alpha}, display_config中的值: fill={display_config.get('zone_fill_color')}, border={display_config.get('zone_border_color')}, alpha={display_config.get('zone_fill_alpha')}")
+                # 再绘制边框（在填充之后，确保边框可见）
+                cv2.polylines(annotated_frame, [polygon_array], True, zone_border_color, 3)
+                
+                # 绘制区域名称（在区域中心）
+                if zone.get('name'):
+                    zone_name = zone.get('name', '')
+                    # 计算区域中心点
+                    center_x = int(np.mean([p[0] for p in zone_points]))
+                    center_y = int(np.mean([p[1] for p in zone_points]))
+                    # 使用PIL绘制中文文字
+                    pil_image = Image.fromarray(cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB))
+                    draw = ImageDraw.Draw(pil_image)
+                    font_size = display_config['font_size']
+                    font = None
+                    font_paths = [
+                        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+                        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+                        "/usr/share/fonts/truetype/arphic/uming.ttc",
+                        "/usr/share/fonts/truetype/arphic/ukai.ttc",
+                        "/System/Library/Fonts/PingFang.ttc",
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+                    ]
+                    for font_path in font_paths:
+                        if os.path.exists(font_path):
+                            try:
+                                font = ImageFont.truetype(font_path, font_size)
+                                break
+                            except:
+                                continue
+                    if font is None:
+                        font = ImageFont.load_default()
+                    
+                    # 绘制文字背景（半透明黑色）
+                    bbox = draw.textbbox((0, 0), zone_name, font=font)
+                    text_width = bbox[2] - bbox[0]
+                    text_height = bbox[3] - bbox[1]
+                    padding = 5
+                    bg_x1 = center_x - text_width // 2 - padding
+                    bg_y1 = center_y - text_height // 2 - padding
+                    bg_x2 = center_x + text_width // 2 + padding
+                    bg_y2 = center_y + text_height // 2 + padding
+                    draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=(0, 0, 0, 180))
+                    
+                    # 绘制文字（使用边框颜色的RGB版本）
+                    text_color_rgb = (zone_border_color_list[2], zone_border_color_list[1], zone_border_color_list[0])  # BGR转RGB
+                    draw.text((center_x - text_width // 2, center_y - text_height // 2), zone_name, 
+                             fill=text_color_rgb, font=font)
+                    annotated_frame = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
             
             # 编码为JPEG
             _, buffer = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -786,7 +854,7 @@ def detection_worker():
             # 准备检测数据
             detection_data = {
                 "frame": f"data:image/jpeg;base64,{frame_base64}",
-                "polygon": polygon_points if polygon_defined else [],
+                "zones": zones,  # 发送所有区域（包括禁用的）
                 "detections": [],
                 "fps": round(fps_counter["current_fps"], 2),
                 "resolution": {
@@ -813,7 +881,26 @@ def detection_worker():
                                 track_id = int(track_ids[i])
                                 bbox_center = [(x1 + x2) / 2, (y1 + y2) / 2]
                                 
-                                in_zone = is_point_in_polygon(bbox_center, polygon_points) if polygon_defined else False
+                                # 检查是否在任何一个启用的区域内
+                                in_zone = False
+                                zone_id = None
+                                enabled_zones = [z for z in zones if z.get('enabled', True) and len(z.get('points', [])) >= 3]
+                                if enabled_zones:
+                                    detection_mode = alarm_config.get('detection_mode', 'center')
+                                    for zone in enabled_zones:
+                                        zone_points = zone.get('points', [])
+                                        if len(zone_points) < 3:
+                                            continue
+                                        if detection_mode == 'center':
+                                            if is_point_in_polygon(bbox_center, zone_points):
+                                                in_zone = True
+                                                zone_id = zone.get('id')
+                                                break
+                                        elif detection_mode == 'edge':
+                                            if is_bbox_in_polygon([x1, y1, x2, y2], zone_points):
+                                                in_zone = True
+                                                zone_id = zone.get('id')
+                                                break
                                 
                                 detection_data["detections"].append({
                                     "id": track_id,
@@ -823,7 +910,8 @@ def detection_worker():
                                     "bbox": [float(x1), float(y1), float(x2), float(y2)],
                                     "center": {"x": float(bbox_center[0]), "y": float(bbox_center[1])},
                                     "confidence": conf,
-                                    "in_zone": in_zone
+                                    "in_zone": in_zone,
+                                    "zone_id": zone_id
                                 })
             
             # 通过WebSocket发送给所有连接的客户端
@@ -845,35 +933,53 @@ detection_thread = threading.Thread(target=detection_worker, daemon=True)
 detection_thread.start()
 
 
-def load_polygon_config():
-    """从配置文件加载多边形区域"""
-    global polygon_points, polygon_defined
-    if os.path.exists(polygon_config_file):
+def load_zones_config():
+    """从配置文件加载多区域配置"""
+    global zones, next_zone_id
+    if os.path.exists(zones_config_file):
         try:
-            with open(polygon_config_file, 'r') as f:
+            with open(zones_config_file, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-                polygon_points = config.get("polygon_points", [])
-                if len(polygon_points) >= 3:
-                    polygon_defined = True
-                    backend_logger.info(f"已从 {polygon_config_file} 加载多边形区域，共 {len(polygon_points)} 个顶点")
-                    return True
+                zones = config.get("zones", [])
+                # 确保每个区域都有必需的字段
+                for zone in zones:
+                    if 'id' not in zone:
+                        zone['id'] = f"zone_{next_zone_id}"
+                        next_zone_id += 1
+                    if 'name' not in zone:
+                        zone['name'] = f"区域{next_zone_id}"
+                    if 'enabled' not in zone:
+                        zone['enabled'] = True
+                    if 'color' not in zone:
+                        zone['color'] = {
+                            "fill": [0, 255, 255],
+                            "border": [0, 255, 255]
+                        }
+                # 更新next_zone_id
+                if zones:
+                    max_id = max([int(z.get('id', '0').split('_')[-1]) if z.get('id', '').startswith('zone_') else 0 for z in zones], default=0)
+                    next_zone_id = max_id + 1
+                backend_logger.info(f"已从 {zones_config_file} 加载 {len(zones)} 个区域")
+                return True
         except Exception as e:
-            backend_logger.error(f"加载配置文件失败: {e}")
+            backend_logger.error(f"加载区域配置文件失败: {e}")
     return False
 
 
-def save_polygon_config():
-    """保存多边形区域到配置文件"""
-    global polygon_points
-    if polygon_points:
-        config = {"polygon_points": polygon_points}
-        with open(polygon_config_file, 'w') as f:
-            json.dump(config, f)
-        backend_logger.info(f"多边形区域已保存到 {polygon_config_file}")
+def save_zones_config():
+    """保存多区域配置到文件"""
+    global zones
+    config = {"zones": zones}
+    try:
+        with open(zones_config_file, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        backend_logger.info(f"多区域配置已保存到 {zones_config_file}")
+    except Exception as e:
+        backend_logger.error(f"保存区域配置失败: {e}")
 
 
-# 加载已保存的多边形区域
-load_polygon_config()
+# 加载已保存的区域配置
+load_zones_config()
 
 
 # 前端页面路由
@@ -894,46 +1000,143 @@ def index():
             return send_from_directory(FRONTEND_DIR, 'index.html')
 
 
-# REST API 路由
-@app.route('/api/polygon', methods=['GET'])
-def get_polygon():
-    """获取当前多边形区域"""
+# REST API 路由 - 多区域管理
+@app.route('/api/zones', methods=['GET'])
+def get_zones():
+    """获取所有区域"""
     return jsonify({
-        "polygon": polygon_points,
-        "defined": polygon_defined
+        "zones": zones,
+        "count": len(zones)
     })
 
 
-@app.route('/api/polygon', methods=['POST'])
-def set_polygon():
-    """设置多边形区域"""
-    global polygon_points, polygon_defined
+@app.route('/api/zones', methods=['POST'])
+def create_zone():
+    """创建新区域"""
+    global zones, next_zone_id
     
     data = request.json
-    points = data.get('polygon', [])
+    points = data.get('points', [])
+    name = data.get('name', f'区域{next_zone_id}')
+    enabled = data.get('enabled', True)
+    color = data.get('color', {
+        "fill": [0, 255, 255],
+        "border": [0, 255, 255]
+    })
     
-    if len(points) >= 3:
-        polygon_points = points
-        polygon_defined = True
-        save_polygon_config()
-        return jsonify({"success": True, "message": "多边形区域已设置"})
-    else:
+    if len(points) < 3:
         return jsonify({"success": False, "message": "至少需要3个顶点"}), 400
+    
+    # 生成唯一ID
+    zone_id = f"zone_{next_zone_id}"
+    next_zone_id += 1
+    
+    new_zone = {
+        "id": zone_id,
+        "name": name,
+        "points": points,
+        "enabled": enabled,
+        "color": color
+    }
+    
+    zones.append(new_zone)
+    save_zones_config()
+    
+    return jsonify({
+        "success": True,
+        "message": "区域已创建",
+        "zone": new_zone
+    })
 
 
-@app.route('/api/polygon', methods=['DELETE'])
-def clear_polygon():
-    """清除多边形区域"""
-    global polygon_points, polygon_defined, alarm_triggered
+@app.route('/api/zones/<zone_id>', methods=['GET'])
+def get_zone(zone_id):
+    """获取指定区域"""
+    zone = next((z for z in zones if z.get('id') == zone_id), None)
+    if zone:
+        return jsonify({"success": True, "zone": zone})
+    else:
+        return jsonify({"success": False, "message": "区域不存在"}), 404
+
+
+@app.route('/api/zones/<zone_id>', methods=['PUT'])
+def update_zone(zone_id):
+    """更新区域"""
+    global zones
     
-    polygon_points = []
-    polygon_defined = False
-    alarm_triggered.clear()
+    zone = next((z for z in zones if z.get('id') == zone_id), None)
+    if not zone:
+        return jsonify({"success": False, "message": "区域不存在"}), 404
     
-    if os.path.exists(polygon_config_file):
-        os.remove(polygon_config_file)
+    data = request.json
     
-    return jsonify({"success": True, "message": "多边形区域已清除"})
+    # 更新区域属性
+    if 'name' in data:
+        zone['name'] = data['name']
+    if 'points' in data:
+        points = data['points']
+        if len(points) < 3:
+            return jsonify({"success": False, "message": "至少需要3个顶点"}), 400
+        zone['points'] = points
+    if 'enabled' in data:
+        zone['enabled'] = bool(data['enabled'])
+    if 'color' in data:
+        zone['color'] = data['color']
+    
+    save_zones_config()
+    
+    return jsonify({
+        "success": True,
+        "message": "区域已更新",
+        "zone": zone
+    })
+
+
+@app.route('/api/zones/<zone_id>', methods=['DELETE'])
+def delete_zone(zone_id):
+    """删除区域"""
+    global zones, alarm_triggered
+    
+    zone = next((z for z in zones if z.get('id') == zone_id), None)
+    if not zone:
+        return jsonify({"success": False, "message": "区域不存在"}), 404
+    
+    zones = [z for z in zones if z.get('id') != zone_id]
+    
+    # 清理该区域的报警记录
+    alarm_triggered = {k: v for k, v in alarm_triggered.items() if k[2] != zone_id}
+    
+    save_zones_config()
+    
+    return jsonify({
+        "success": True,
+        "message": "区域已删除"
+    })
+
+
+@app.route('/api/zones/<zone_id>/rename', methods=['POST'])
+def rename_zone(zone_id):
+    """重命名区域"""
+    global zones
+    
+    zone = next((z for z in zones if z.get('id') == zone_id), None)
+    if not zone:
+        return jsonify({"success": False, "message": "区域不存在"}), 404
+    
+    data = request.json
+    new_name = data.get('name', '')
+    
+    if not new_name or not new_name.strip():
+        return jsonify({"success": False, "message": "区域名称不能为空"}), 400
+    
+    zone['name'] = new_name.strip()
+    save_zones_config()
+    
+    return jsonify({
+        "success": True,
+        "message": "区域已重命名",
+        "zone": zone
+    })
 
 
 @app.route('/api/status', methods=['GET'])
@@ -943,10 +1146,12 @@ def get_status():
     # 重新检测GPU状态
     gpu_available, device = check_gpu_available()
     
+    enabled_zones_count = len([z for z in zones if z.get('enabled', True)])
+    
     return jsonify({
         "video_connected": not frame_queue.empty() or latest_frame is not None,
-        "polygon_defined": polygon_defined,
-        "polygon_points_count": len(polygon_points),
+        "zones_count": len(zones),
+        "enabled_zones_count": enabled_zones_count,
         "current_model": current_model_name,
         "video_url": video_path,
         "gpu_available": gpu_available,

@@ -9,8 +9,8 @@
             <el-tag :type="connectionStatus === 'connected' ? 'success' : 'danger'" effect="dark">
               {{ connectionStatus === 'connected' ? '已连接' : '未连接' }}
             </el-tag>
-            <el-tag :type="polygonDefined ? 'success' : 'info'" effect="dark">
-              {{ polygonDefined ? `已设置区域 (${polygonPoints}个顶点)` : '未设置区域' }}
+            <el-tag :type="zonesCount > 0 ? 'success' : 'info'" effect="dark">
+              {{ zonesCount > 0 ? `已设置 ${zonesCount} 个区域` : '未设置区域' }}
             </el-tag>
           </div>
         </div>
@@ -36,14 +36,22 @@
           <el-col :span="16">
             <VideoPanel
               ref="videoPanelRef"
-              :polygon="currentPolygon"
-              @polygon-updated="handlePolygonUpdated"
+              :zones="zones"
+              @zones-updated="handleZonesUpdated"
             />
           </el-col>
 
           <!-- 侧边栏 -->
           <el-col :span="8">
             <el-space direction="vertical" :size="20" style="width: 100%">
+              <!-- 区域管理 -->
+              <ZoneManager
+                :zones="zones"
+                @zone-selected="handleZoneSelected"
+                @start-drawing="handleStartDrawing"
+                @zone-updated="handleZoneUpdated"
+              />
+              
               <!-- 报警记录 -->
               <el-card shadow="hover">
                 <template #header>
@@ -90,17 +98,18 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import { io } from 'socket.io-client'
+import axios from 'axios'
 import ConfigPanel from './components/ConfigPanel.vue'
 import VideoPanel from './components/VideoPanel.vue'
 import AlarmList from './components/AlarmList.vue'
 import DetectionInfo from './components/DetectionInfo.vue'
 import LogPanel from './components/LogPanel.vue'
+import ZoneManager from './components/ZoneManager.vue'
 
 // 状态
 const connectionStatus = ref('disconnected')
-const polygonDefined = ref(false)
-const polygonPoints = ref(0)
-const currentPolygon = ref([])
+const zones = ref([])
+const zonesCount = ref(0)
 const alarms = ref([])
 const detections = ref([])
 const logs = ref([])
@@ -127,6 +136,8 @@ onMounted(() => {
   socket.on('connect', () => {
     console.log('已连接到服务器', socket.id)
     connectionStatus.value = 'connected'
+    // 连接后加载区域列表
+    handleZonesUpdated()
   })
 
   socket.on('disconnect', () => {
@@ -146,15 +157,10 @@ onMounted(() => {
       console.warn('videoPanelRef 未初始化')
     }
     
-    // 更新多边形状态
-    if (data.polygon && data.polygon.length >= 3) {
-      currentPolygon.value = data.polygon
-      polygonDefined.value = true
-      polygonPoints.value = data.polygon.length
-    } else {
-      currentPolygon.value = []
-      polygonDefined.value = false
-      polygonPoints.value = 0
+    // 更新区域状态
+    if (data.zones) {
+      zones.value = data.zones
+      zonesCount.value = data.zones.length
     }
     
     // 更新检测信息
@@ -212,14 +218,27 @@ const handleAlarmChanged = () => {
   // 报警配置更新后的处理
 }
 
-const handlePolygonUpdated = (polygon) => {
-  currentPolygon.value = polygon
-  if (polygon && polygon.length >= 3) {
-    polygonDefined.value = true
-    polygonPoints.value = polygon.length
-  } else {
-    polygonDefined.value = false
-    polygonPoints.value = 0
+const handleZonesUpdated = async () => {
+  // 重新加载区域列表
+  try {
+    const res = await axios.get('/api/zones')
+    if (res.data.zones) {
+      zones.value = res.data.zones
+      zonesCount.value = res.data.zones.length
+    }
+  } catch (error) {
+    console.error('加载区域失败:', error)
+  }
+}
+
+const handleZoneSelected = (zoneId) => {
+  // 区域选择处理（可选）
+}
+
+const handleStartDrawing = (zone = null) => {
+  // 开始绘制区域
+  if (videoPanelRef.value && videoPanelRef.value.startDrawing) {
+    videoPanelRef.value.startDrawing(zone)
   }
 }
 

@@ -11,7 +11,7 @@
     0,
     183
   ],
-  "use_chinese": true,
+  "use_chinese": false,
   "zone_fill_color": [
     28,
     53,
@@ -22,5 +22,5 @@
     55,
     234
   ],
-  "zone_fill_alpha": 0.7
+  "zone_fill_alpha": 0.3
 }
