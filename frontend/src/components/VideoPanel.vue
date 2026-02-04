@@ -2,7 +2,7 @@
   <el-card shadow="hover">
     <template #header>
       <div class="card-header">
-        <span>视频监控</span>
+        <span>区域报警</span>
         <div class="video-stats">
           <span>FPS: {{ fps.toFixed(1) }}</span>
           <span>分辨率: {{ resolution }}</span>
@@ -11,7 +11,7 @@
     </template>
     
     <div class="video-container" ref="containerRef">
-      <canvas ref="videoCanvasRef" class="video-canvas"></canvas>
+      <img ref="videoImgRef" class="video-img" :src="processedVideoStreamUrl" @load="onVideoImageLoad" @error="onVideoImageError" />
       <canvas ref="drawCanvasRef" class="draw-canvas" @click="handleCanvasClick" @mousemove="handleCanvasMouseMove" @dblclick="finishDrawing"></canvas>
       
       <div v-if="isDrawing" class="drawing-hint">
@@ -33,7 +33,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import axios from 'axios'
 
@@ -47,11 +47,18 @@ const props = defineProps({
 const emit = defineEmits(['zones-updated'])
 
 const containerRef = ref(null)
-const videoCanvasRef = ref(null)
+const videoImgRef = ref(null)
 const drawCanvasRef = ref(null)
 
-let videoCtx = null
 let drawCtx = null
+
+// 构建处理后视频流URL
+const processedVideoStreamUrl = computed(() => {
+  const baseUrl = import.meta.env.DEV 
+    ? (import.meta.env.VITE_API_URL || `http://${window.location.hostname}:5000`)
+    : window.location.origin
+  return `${baseUrl}/api/video/processed_stream`
+})
 
 const isDrawing = ref(false)
 const polygonPoints = ref([])
@@ -71,11 +78,10 @@ let videoWidth = 0
 let videoHeight = 0
 
 onMounted(() => {
-  if (videoCanvasRef.value && drawCanvasRef.value) {
-    videoCtx = videoCanvasRef.value.getContext('2d')
+  if (drawCanvasRef.value) {
     drawCtx = drawCanvasRef.value.getContext('2d')
     
-    if (!videoCtx || !drawCtx) {
+    if (!drawCtx) {
       console.error('无法获取 Canvas 上下文')
       return
     }
@@ -116,47 +122,37 @@ const resizeCanvases = () => {
   const width = containerRef.value.clientWidth
   const height = containerRef.value.clientHeight
   
-  videoCanvasRef.value.width = width
-  videoCanvasRef.value.height = height
   drawCanvasRef.value.width = width
   drawCanvasRef.value.height = height
   
   drawAllZones()
 }
 
-const updateFrame = (data) => {
-  if (!videoCtx || !videoCanvasRef.value) return
-  
-  if (!data || !data.frame) {
-    console.warn('收到空的视频帧数据')
-    return
-  }
-  
-  const img = new Image()
-  img.onload = () => {
-    try {
-      videoCtx.clearRect(0, 0, videoCanvasRef.value.width, videoCanvasRef.value.height)
-      videoCtx.drawImage(img, 0, 0, videoCanvasRef.value.width, videoCanvasRef.value.height)
-      
-      if (videoWidth !== img.width || videoHeight !== img.height) {
-        videoWidth = img.width
-        videoHeight = img.height
-        // 视频尺寸变化时重新绘制区域
-        drawAllZones()
-      }
-    } catch (error) {
-      console.error('绘制视频帧失败:', error)
+const onVideoImageLoad = () => {
+  if (videoImgRef.value) {
+    const img = videoImgRef.value
+    if (videoWidth !== img.naturalWidth || videoHeight !== img.naturalHeight) {
+      videoWidth = img.naturalWidth
+      videoHeight = img.naturalHeight
+      // 视频尺寸变化时重新绘制区域
+      drawAllZones()
     }
+    resolution.value = `${img.naturalWidth}x${img.naturalHeight}`
   }
-  img.onerror = (error) => {
-    console.error('加载视频帧图片失败:', error, data.frame.substring(0, 50))
-  }
-  img.src = data.frame
-  
-  if (data.fps !== undefined) {
+}
+
+const onVideoImageError = (error) => {
+  console.error('视频流加载错误:', error)
+  resolution.value = '连接失败'
+}
+
+// 保留updateFrame方法以兼容WebSocket（如果需要检测数据）
+const updateFrame = (data) => {
+  // 如果使用MJPEG流，这个方法不再需要，但保留以兼容
+  if (data && data.fps !== undefined) {
     fps.value = data.fps
   }
-  if (data.resolution) {
+  if (data && data.resolution) {
     resolution.value = `${data.resolution.width}x${data.resolution.height}`
   }
 }
@@ -570,7 +566,7 @@ defineExpose({
   aspect-ratio: 16/9;
 }
 
-.video-canvas,
+.video-img,
 .draw-canvas {
   position: absolute;
   top: 0;
@@ -578,6 +574,10 @@ defineExpose({
   width: 100%;
   height: 100%;
   display: block;
+}
+
+.video-img {
+  object-fit: contain;
 }
 
 .draw-canvas {

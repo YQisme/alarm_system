@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import cv2
@@ -12,6 +12,8 @@ import numpy as np
 from datetime import datetime
 from ultralytics import YOLO
 from PIL import Image, ImageDraw, ImageFont
+import subprocess
+import signal
 
 # 获取项目根目录路径（backend/ 的父目录）
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -111,6 +113,19 @@ model_classes_file = os.path.join(CONFIG_DIR, "model_classes.json")  # 模型类
 alarm_config_file = os.path.join(CONFIG_DIR, "alarm_config.json")  # 报警配置文件
 latest_frame = None  # 最新帧
 latest_results = None  # 最新检测结果
+latest_annotated_frame = None  # 最新处理后的帧（包含YOLO检测结果和区域绘制）
+
+# 录制相关变量
+recording_lock = threading.Lock()  # 录制锁
+is_recording = False  # 是否正在录制
+recording_process = None  # ffmpeg进程对象
+recording_start_time = 0  # 当前分段开始时间
+recording_file_index = 0  # 文件索引（用于分割）
+recording_config = {
+    "save_path": os.path.join(BASE_DIR, "recordings"),  # 默认保存路径
+    "segment_duration": 300  # 默认分割时长（秒），5分钟
+}
+recording_config_file = os.path.join(CONFIG_DIR, "recording_config.json")  # 录制配置文件
 
 # 视频信息
 video_info = {
@@ -577,7 +592,7 @@ def video_reader():
 
 def detection_worker():
     """检测工作线程"""
-    global latest_frame, latest_results, zones, fps_counter, display_config
+    global latest_frame, latest_results, latest_annotated_frame, zones, fps_counter, display_config
     
     while not stop_flag.is_set():
         try:
@@ -837,6 +852,9 @@ def detection_worker():
                              fill=text_color_rgb, font=font)
                     annotated_frame = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
             
+            # 保存处理后的帧（用于MJPEG流）
+            latest_annotated_frame = annotated_frame.copy()
+            
             # 编码为JPEG
             _, buffer = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             frame_base64 = base64.b64encode(buffer).decode('utf-8')
@@ -932,6 +950,59 @@ reader_thread.start()
 detection_thread = threading.Thread(target=detection_worker, daemon=True)
 detection_thread.start()
 
+# MJPEG视频流生成器（不经过YOLO处理）
+def generate_raw_video_stream():
+    """生成原始RTSP视频流的MJPEG流"""
+    global latest_frame
+    
+    while not stop_flag.is_set():
+        try:
+            # 获取最新帧
+            if latest_frame is not None:
+                frame = latest_frame.copy()
+                
+                # 编码为JPEG
+                success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if success:
+                    frame_bytes = buffer.tobytes()
+                    # 生成MJPEG格式的帧
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            
+            # 控制发送频率（约30fps）
+            time.sleep(1.0 / 30.0)
+            
+        except Exception as e:
+            backend_logger.error(f"原始视频MJPEG流生成错误: {e}")
+            time.sleep(0.1)
+
+
+# MJPEG视频流生成器（经过YOLO处理）
+def generate_processed_video_stream():
+    """生成经过YOLO处理的视频流的MJPEG流"""
+    global latest_annotated_frame
+    
+    while not stop_flag.is_set():
+        try:
+            # 获取最新处理后的帧
+            if latest_annotated_frame is not None:
+                frame = latest_annotated_frame.copy()
+                
+                # 编码为JPEG
+                success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if success:
+                    frame_bytes = buffer.tobytes()
+                    # 生成MJPEG格式的帧
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            
+            # 控制发送频率（约30fps）
+            time.sleep(1.0 / 30.0)
+            
+        except Exception as e:
+            backend_logger.error(f"处理后视频MJPEG流生成错误: {e}")
+            time.sleep(0.1)
+
 
 def load_zones_config():
     """从配置文件加载多区域配置"""
@@ -980,6 +1051,157 @@ def save_zones_config():
 
 # 加载已保存的区域配置
 load_zones_config()
+
+# 录制配置管理
+def load_recording_config():
+    """从配置文件加载录制配置"""
+    global recording_config
+    if os.path.exists(recording_config_file):
+        try:
+            with open(recording_config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                if 'save_path' in config:
+                    recording_config['save_path'] = config['save_path']
+                if 'segment_duration' in config:
+                    recording_config['segment_duration'] = int(config['segment_duration'])
+                backend_logger.info(f"已从 {recording_config_file} 加载录制配置")
+        except Exception as e:
+            backend_logger.error(f"加载录制配置文件失败: {e}")
+    else:
+        # 确保默认保存路径存在
+        os.makedirs(recording_config['save_path'], exist_ok=True)
+
+def save_recording_config():
+    """保存录制配置到文件"""
+    try:
+        with open(recording_config_file, 'w', encoding='utf-8') as f:
+            json.dump(recording_config, f, indent=2, ensure_ascii=False)
+        backend_logger.info(f"录制配置已保存到 {recording_config_file}")
+    except Exception as e:
+        backend_logger.error(f"保存录制配置失败: {e}")
+
+# 加载录制配置
+load_recording_config()
+
+# 录制管理函数
+def start_recording():
+    """开始录制RTSP流（使用ffmpeg直接录制，不经过编解码）"""
+    global is_recording, recording_process, recording_start_time, recording_file_index, video_path
+    
+    with recording_lock:
+        if is_recording:
+            return {"success": False, "message": "已经在录制中"}
+        
+        try:
+            # 确保保存路径存在
+            save_path = recording_config['save_path']
+            os.makedirs(save_path, exist_ok=True)
+            
+            # 使用ffmpeg直接录制RTSP流，使用copy模式避免重新编码
+            # -c copy: 直接复制流，不进行编解码（最快）
+            # -f segment: 分段录制
+            # -segment_time: 每段时长（秒）
+            # -segment_format mp4: 输出格式
+            # -reset_timestamps 1: 重置时间戳
+            # -strftime 1: 使用时间戳命名
+            segment_duration = recording_config['segment_duration']
+            
+            # 生成输出文件名模板（带时间戳和索引）
+            output_template = os.path.join(save_path, "recording_%Y%m%d_%H%M%S_%04d.mp4")
+            
+            ffmpeg_cmd = [
+                'ffmpeg',
+                '-rtsp_transport', 'tcp',  # 使用TCP传输，更稳定
+                '-i', video_path,  # 输入RTSP流
+                '-c', 'copy',  # 直接复制，不编解码
+                '-f', 'segment',  # 分段模式
+                '-segment_time', str(segment_duration),  # 每段时长
+                '-segment_format', 'mp4',  # 输出格式
+                '-reset_timestamps', '1',  # 重置时间戳
+                '-strftime', '1',  # 使用时间戳
+                '-segment_atclocktime', '1',  # 按时钟时间分割
+                output_template
+            ]
+            
+            # 启动ffmpeg进程
+            recording_process = subprocess.Popen(
+                ffmpeg_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE
+            )
+            
+            is_recording = True
+            recording_start_time = time.time()
+            recording_file_index = 0
+            
+            backend_logger.info(f"开始录制RTSP流到: {save_path}, 分段时长: {segment_duration}秒")
+            return {"success": True, "message": "录制已开始", "save_path": save_path}
+            
+        except FileNotFoundError:
+            backend_logger.error("ffmpeg未找到，请确保已安装ffmpeg")
+            return {"success": False, "message": "ffmpeg未安装，请先安装ffmpeg"}
+        except Exception as e:
+            backend_logger.error(f"启动录制失败: {e}")
+            return {"success": False, "message": f"启动录制失败: {str(e)}"}
+
+def stop_recording():
+    """停止录制"""
+    global is_recording, recording_process
+    
+    with recording_lock:
+        if not is_recording:
+            return {"success": False, "message": "当前没有在录制"}
+        
+        try:
+            if recording_process:
+                # 发送'q'给ffmpeg以正常结束录制
+                try:
+                    recording_process.stdin.write(b'q\n')
+                    recording_process.stdin.flush()
+                except:
+                    pass
+                
+                # 等待进程结束（最多等待5秒）
+                try:
+                    recording_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    # 如果5秒内没有结束，强制终止
+                    recording_process.terminate()
+                    try:
+                        recording_process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        recording_process.kill()
+                
+                recording_process = None
+            
+            is_recording = False
+            backend_logger.info("录制已停止")
+            return {"success": True, "message": "录制已停止"}
+            
+        except Exception as e:
+            backend_logger.error(f"停止录制失败: {e}")
+            is_recording = False
+            recording_process = None
+            return {"success": False, "message": f"停止录制失败: {str(e)}"}
+
+def get_recording_status():
+    """获取录制状态"""
+    global is_recording, recording_start_time, recording_config
+    
+    with recording_lock:
+        status = {
+            "is_recording": is_recording,
+            "save_path": recording_config['save_path'],
+            "segment_duration": recording_config['segment_duration']
+        }
+        
+        if is_recording:
+            elapsed = time.time() - recording_start_time
+            status["elapsed_time"] = int(elapsed)
+            status["current_segment_time"] = int(elapsed % recording_config['segment_duration'])
+        
+        return status
 
 
 # 前端页面路由
@@ -1499,6 +1721,294 @@ def handle_connect():
 def handle_disconnect():
     """客户端断开连接"""
     backend_logger.info(f"客户端已断开: {request.sid}")
+
+
+@app.route('/api/video/stream')
+def video_stream():
+    """原始RTSP视频流（MJPEG格式，不经过YOLO处理）"""
+    return Response(
+        generate_raw_video_stream(),
+        mimetype='multipart/x-mixed-replace; boundary=frame'
+    )
+
+
+@app.route('/api/video/processed_stream')
+def processed_video_stream():
+    """经过YOLO处理的视频流（MJPEG格式，包含检测框和区域）"""
+    return Response(
+        generate_processed_video_stream(),
+        mimetype='multipart/x-mixed-replace; boundary=frame'
+    )
+
+
+# 录制相关API
+@app.route('/api/recording/status', methods=['GET'])
+def get_recording_status_api():
+    """获取录制状态"""
+    return jsonify(get_recording_status())
+
+
+@app.route('/api/recording/start', methods=['POST'])
+def start_recording_api():
+    """开始录制"""
+    result = start_recording()
+    return jsonify(result)
+
+
+@app.route('/api/recording/stop', methods=['POST'])
+def stop_recording_api():
+    """停止录制"""
+    result = stop_recording()
+    return jsonify(result)
+
+
+@app.route('/api/recording/config', methods=['GET'])
+def get_recording_config_api():
+    """获取录制配置"""
+    return jsonify(recording_config)
+
+
+@app.route('/api/recording/config', methods=['POST'])
+def set_recording_config_api():
+    """设置录制配置"""
+    global recording_config
+    
+    data = request.json
+    
+    try:
+        if 'save_path' in data:
+            save_path = data['save_path'].strip()
+            if not save_path:
+                return jsonify({"success": False, "message": "保存路径不能为空"}), 400
+            # 确保路径存在
+            os.makedirs(save_path, exist_ok=True)
+            recording_config['save_path'] = save_path
+        
+        if 'segment_duration' in data:
+            segment_duration = int(data['segment_duration'])
+            if segment_duration < 60:
+                return jsonify({"success": False, "message": "分割时长不能少于60秒"}), 400
+            if segment_duration > 3600:
+                return jsonify({"success": False, "message": "分割时长不能超过3600秒"}), 400
+            recording_config['segment_duration'] = segment_duration
+        
+        save_recording_config()
+        return jsonify({
+            "success": True,
+            "message": "录制配置已更新",
+            "config": recording_config
+        })
+    except ValueError:
+        return jsonify({"success": False, "message": "参数格式错误"}), 400
+    except Exception as e:
+        return jsonify({"success": False, "message": f"设置失败: {str(e)}"}), 500
+
+
+@app.route('/api/recording/videos', methods=['GET'])
+def list_recording_videos():
+    """列出所有录制的视频文件"""
+    try:
+        save_path = recording_config.get('save_path', '')
+        if not save_path or not os.path.exists(save_path):
+            return jsonify({
+                "success": True,
+                "videos": [],
+                "count": 0,
+                "save_path": save_path
+            })
+        
+        videos = []
+        for filename in os.listdir(save_path):
+            if filename.endswith(('.mp4', '.avi', '.mkv', '.mov')):
+                filepath = os.path.join(save_path, filename)
+                try:
+                    file_stat = os.stat(filepath)
+                    file_size = file_stat.st_size
+                    modified_time = datetime.fromtimestamp(file_stat.st_mtime)
+                    
+                    videos.append({
+                        "filename": filename,
+                        "size": file_size,
+                        "size_mb": round(file_size / (1024 * 1024), 2),
+                        "size_gb": round(file_size / (1024 * 1024 * 1024), 2),
+                        "modified_time": modified_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "modified_timestamp": file_stat.st_mtime
+                    })
+                except Exception as e:
+                    backend_logger.warning(f"获取文件信息失败 {filename}: {e}")
+                    continue
+        
+        # 按修改时间倒序排列（最新的在前）
+        videos.sort(key=lambda x: x['modified_timestamp'], reverse=True)
+        
+        return jsonify({
+            "success": True,
+            "videos": videos,
+            "count": len(videos),
+            "save_path": save_path
+        })
+    except Exception as e:
+        backend_logger.error(f"列出录制视频失败: {e}")
+        return jsonify({"success": False, "message": f"列出视频失败: {str(e)}"}), 500
+
+
+@app.route('/api/recording/videos/<filename>', methods=['GET'])
+def download_recording_video(filename):
+    """下载录制的视频文件"""
+    try:
+        save_path = recording_config.get('save_path', '')
+        if not save_path:
+            return jsonify({"success": False, "message": "保存路径未配置"}), 400
+        
+        # 安全检查：防止路径遍历攻击
+        filename = os.path.basename(filename)  # 只保留文件名，去除路径
+        filepath = os.path.join(save_path, filename)
+        
+        # 确保文件在保存路径内
+        if not os.path.abspath(filepath).startswith(os.path.abspath(save_path)):
+            return jsonify({"success": False, "message": "无效的文件路径"}), 400
+        
+        if not os.path.exists(filepath):
+            return jsonify({"success": False, "message": "文件不存在"}), 404
+        
+        # 使用send_from_directory发送文件
+        return send_from_directory(
+            save_path,
+            filename,
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        backend_logger.error(f"下载录制视频失败: {e}")
+        return jsonify({"success": False, "message": f"下载失败: {str(e)}"}), 500
+
+
+@app.route('/api/recording/videos/<filename>', methods=['DELETE'])
+def delete_recording_video(filename):
+    """删除录制的视频文件"""
+    try:
+        save_path = recording_config.get('save_path', '')
+        if not save_path:
+            return jsonify({"success": False, "message": "保存路径未配置"}), 400
+        
+        # 安全检查：防止路径遍历攻击
+        filename = os.path.basename(filename)
+        filepath = os.path.join(save_path, filename)
+        
+        # 确保文件在保存路径内
+        if not os.path.abspath(filepath).startswith(os.path.abspath(save_path)):
+            return jsonify({"success": False, "message": "无效的文件路径"}), 400
+        
+        if not os.path.exists(filepath):
+            return jsonify({"success": False, "message": "文件不存在"}), 404
+        
+        # 删除文件
+        os.remove(filepath)
+        backend_logger.info(f"已删除录制视频: {filename}")
+        
+        return jsonify({
+            "success": True,
+            "message": "视频已删除"
+        })
+    except Exception as e:
+        backend_logger.error(f"删除录制视频失败: {e}")
+        return jsonify({"success": False, "message": f"删除失败: {str(e)}"}), 500
+
+
+@app.route('/api/recording/videos/<filename>/rename', methods=['POST'])
+def rename_recording_video(filename):
+    """重命名录制的视频文件"""
+    try:
+        save_path = recording_config.get('save_path', '')
+        if not save_path:
+            return jsonify({"success": False, "message": "保存路径未配置"}), 400
+        
+        data = request.json
+        new_filename = data.get('new_filename', '').strip()
+        
+        if not new_filename:
+            return jsonify({"success": False, "message": "新文件名不能为空"}), 400
+        
+        # 安全检查
+        filename = os.path.basename(filename)
+        new_filename = os.path.basename(new_filename)  # 只保留文件名
+        
+        # 确保新文件名有正确的扩展名
+        old_ext = os.path.splitext(filename)[1]
+        if not new_filename.endswith(old_ext):
+            new_filename = new_filename + old_ext
+        
+        old_filepath = os.path.join(save_path, filename)
+        new_filepath = os.path.join(save_path, new_filename)
+        
+        # 确保文件在保存路径内
+        if not os.path.abspath(old_filepath).startswith(os.path.abspath(save_path)):
+            return jsonify({"success": False, "message": "无效的文件路径"}), 400
+        
+        if not os.path.exists(old_filepath):
+            return jsonify({"success": False, "message": "文件不存在"}), 404
+        
+        if os.path.exists(new_filepath):
+            return jsonify({"success": False, "message": "目标文件名已存在"}), 400
+        
+        # 重命名文件
+        os.rename(old_filepath, new_filepath)
+        backend_logger.info(f"已重命名录制视频: {filename} -> {new_filename}")
+        
+        return jsonify({
+            "success": True,
+            "message": "视频已重命名",
+            "new_filename": new_filename
+        })
+    except Exception as e:
+        backend_logger.error(f"重命名录制视频失败: {e}")
+        return jsonify({"success": False, "message": f"重命名失败: {str(e)}"}), 500
+
+
+@app.route('/api/recording/videos/<filename>/preview', methods=['GET'])
+def preview_recording_video(filename):
+    """获取视频预览（返回视频的第一帧）"""
+    try:
+        save_path = recording_config.get('save_path', '')
+        if not save_path:
+            return jsonify({"success": False, "message": "保存路径未配置"}), 400
+        
+        # 安全检查
+        filename = os.path.basename(filename)
+        filepath = os.path.join(save_path, filename)
+        
+        # 确保文件在保存路径内
+        if not os.path.abspath(filepath).startswith(os.path.abspath(save_path)):
+            return jsonify({"success": False, "message": "无效的文件路径"}), 400
+        
+        if not os.path.exists(filepath):
+            return jsonify({"success": False, "message": "文件不存在"}), 404
+        
+        # 使用OpenCV读取视频第一帧
+        cap = cv2.VideoCapture(filepath)
+        if not cap.isOpened():
+            return jsonify({"success": False, "message": "无法打开视频文件"}), 500
+        
+        ret, frame = cap.read()
+        cap.release()
+        
+        if not ret or frame is None:
+            return jsonify({"success": False, "message": "无法读取视频帧"}), 500
+        
+        # 编码为JPEG
+        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        frame_bytes = buffer.tobytes()
+        
+        # 返回图片
+        from flask import Response
+        return Response(
+            frame_bytes,
+            mimetype='image/jpeg',
+            headers={'Content-Disposition': f'inline; filename=preview_{filename}.jpg'}
+        )
+    except Exception as e:
+        backend_logger.error(f"获取视频预览失败: {e}")
+        return jsonify({"success": False, "message": f"获取预览失败: {str(e)}"}), 500
 
 
 @app.route('/api/alarm', methods=['GET'])
