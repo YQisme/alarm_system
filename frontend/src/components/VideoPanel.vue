@@ -192,26 +192,26 @@ const drawAllZones = () => {
     const alpha = zoneFillAlpha.value
     
     const borderHex = rgbToHex(borderColor[0], borderColor[1], borderColor[2])
-    drawCtx.strokeStyle = borderHex
-    drawCtx.lineWidth = 3
-    
+  drawCtx.strokeStyle = borderHex
+  drawCtx.lineWidth = 3
+  
     // 使用区域的填充颜色和透明度
     drawCtx.fillStyle = rgbToRgba(fillColor, alpha)
-    
-    drawCtx.beginPath()
+  
+  drawCtx.beginPath()
     zone.points.forEach((point, index) => {
-      const x = point[0] * scaleX
-      const y = point[1] * scaleY
-      if (index === 0) {
-        drawCtx.moveTo(x, y)
-      } else {
-        drawCtx.lineTo(x, y)
-      }
-    })
-    drawCtx.closePath()
-    drawCtx.fill()
-    drawCtx.stroke()
-    
+    const x = point[0] * scaleX
+    const y = point[1] * scaleY
+    if (index === 0) {
+      drawCtx.moveTo(x, y)
+    } else {
+      drawCtx.lineTo(x, y)
+    }
+  })
+  drawCtx.closePath()
+  drawCtx.fill()
+  drawCtx.stroke()
+  
     // 绘制区域名称
     if (zone.name) {
       const centerX = zone.points.reduce((sum, p) => sum + p[0], 0) / zone.points.length * scaleX
@@ -229,7 +229,7 @@ const drawAllZones = () => {
       drawCtx.fillRect(centerX - textWidth / 2 - padding, centerY - 10 - padding, textWidth + padding * 2, 20 + padding * 2)
       
       // 绘制文字
-      drawCtx.fillStyle = borderHex
+    drawCtx.fillStyle = borderHex
       drawCtx.fillText(zone.name, centerX, centerY)
     }
   })

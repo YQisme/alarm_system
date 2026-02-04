@@ -102,7 +102,11 @@ alarm_triggered = {}  # 记录已触发报警的跟踪ID，格式：{(track_id, 
 alarm_config = {
     "debounce_time": 5.0,  # 防抖时间（秒），同一目标在此时间内只报警一次
     "detection_mode": "center",  # 检测模式："center"=中心点，"edge"=边框任意点
-    "once_per_id": False  # 相同ID是否只报警一次（True=整个生命周期只报警一次，False=允许重复报警）
+    "once_per_id": False,  # 相同ID是否只报警一次（True=整个生命周期只报警一次，False=允许重复报警）
+    "save_event_video": True,  # 是否保存报警事件视频
+    "save_event_image": True,  # 是否保存报警事件图片
+    "event_video_duration": 10,  # 报警事件视频时长（秒）
+    "event_save_path": os.path.join(BASE_DIR, "alarm_events")  # 报警事件保存路径
 }
 
 zones_config_file = os.path.join(CONFIG_DIR, "zones_config.json")  # 多区域配置文件
@@ -421,9 +425,24 @@ def load_alarm_config():
                     alarm_config['detection_mode'] = config['detection_mode']
                 if 'once_per_id' in config:
                     alarm_config['once_per_id'] = bool(config['once_per_id'])
+                if 'save_event_video' in config:
+                    alarm_config['save_event_video'] = bool(config['save_event_video'])
+                if 'save_event_image' in config:
+                    alarm_config['save_event_image'] = bool(config['save_event_image'])
+                if 'event_video_duration' in config:
+                    alarm_config['event_video_duration'] = int(config['event_video_duration'])
+                if 'event_save_path' in config:
+                    alarm_config['event_save_path'] = config['event_save_path']
                 backend_logger.info(f"已从 {alarm_config_file} 加载报警配置")
         except Exception as e:
             backend_logger.error(f"加载报警配置文件失败: {e}")
+    
+    # 确保事件保存路径存在
+    if alarm_config.get('save_event_video') or alarm_config.get('save_event_image'):
+        event_path = alarm_config.get('event_save_path', os.path.join(BASE_DIR, "alarm_events"))
+        os.makedirs(event_path, exist_ok=True)
+        os.makedirs(os.path.join(event_path, "videos"), exist_ok=True)
+        os.makedirs(os.path.join(event_path, "images"), exist_ok=True)
 
 def save_alarm_config():
     """保存报警配置到文件"""
@@ -477,6 +496,174 @@ def is_bbox_in_polygon(bbox, polygon):
     return False
 
 
+def save_alarm_event_video(track_id, zone_id, zone_name, class_id, class_name_cn, bbox_center):
+    """保存报警事件视频（使用ffmpeg从RTSP流录制指定时长）"""
+    try:
+        if not alarm_config.get('save_event_video', True):
+            return None
+        
+        event_path = alarm_config.get('event_save_path', os.path.join(BASE_DIR, "alarm_events"))
+        video_dir = os.path.join(event_path, "videos")
+        os.makedirs(video_dir, exist_ok=True)
+        
+        duration = alarm_config.get('event_video_duration', 10)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        object_name = class_name_cn if class_name_cn else f"class_{class_id}"
+        # 清理文件名中的非法字符
+        safe_zone_name = zone_name.replace('/', '_').replace('\\', '_').replace(':', '_')
+        safe_object_name = object_name.replace('/', '_').replace('\\', '_').replace(':', '_')
+        filename = f"alarm_{timestamp}_ID{track_id}_{safe_object_name}_{safe_zone_name}.mp4"
+        filepath = os.path.join(video_dir, filename)
+        
+        # 使用ffmpeg从RTSP流录制指定时长的视频
+        # 使用重新编码方式，确保兼容性
+        # 先尝试使用copy，如果失败再使用编码（但这里直接使用编码以确保兼容性）
+        ffmpeg_cmd = [
+            'ffmpeg',
+            '-rtsp_transport', 'tcp',
+            '-i', video_path,
+            '-t', str(duration),  # 录制时长
+            '-c:v', 'libx264',  # 视频编码器
+            '-preset', 'ultrafast',  # 最快编码速度
+            '-crf', '23',  # 质量参数（18-28，23是默认值）
+            '-an',  # 禁用音频（很多RTSP流没有音频）
+            '-movflags', '+faststart',  # 优化网络播放
+            '-y',  # 覆盖已存在的文件
+            '-loglevel', 'error',  # 只显示错误信息
+            filepath
+        ]
+        
+        # 在后台线程中执行，避免阻塞
+        def record_video():
+            try:
+                process = subprocess.Popen(
+                    ffmpeg_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    stdin=subprocess.DEVNULL  # 避免等待stdin输入
+                )
+                stdout, stderr = process.communicate(timeout=duration + 10)  # 等待录制完成
+                
+                if process.returncode == 0:
+                    # 检查文件是否真的存在且有内容
+                    if os.path.exists(filepath) and os.path.getsize(filepath) > 1000:  # 至少1KB
+                        backend_logger.info(f"报警事件视频已保存: {filename} ({os.path.getsize(filepath)} bytes)")
+                    else:
+                        backend_logger.error(f"报警事件视频文件异常: {filename} (大小: {os.path.getsize(filepath) if os.path.exists(filepath) else 0} bytes)")
+                else:
+                    error_msg = stderr.decode('utf-8', errors='ignore') if stderr else "未知错误"
+                    backend_logger.error(f"ffmpeg录制失败 (返回码: {process.returncode}): {error_msg}")
+                    # 删除失败的文件
+                    if os.path.exists(filepath):
+                        try:
+                            os.remove(filepath)
+                        except:
+                            pass
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+                backend_logger.warning(f"报警事件视频录制超时: {filename}")
+                # 删除不完整的文件
+                if os.path.exists(filepath):
+                    try:
+                        os.remove(filepath)
+                    except:
+                        pass
+            except Exception as e:
+                backend_logger.error(f"保存报警事件视频失败: {e}")
+                # 删除失败的文件
+                if os.path.exists(filepath):
+                    try:
+                        os.remove(filepath)
+                    except:
+                        pass
+        
+        threading.Thread(target=record_video, daemon=True).start()
+        return filename
+        
+    except Exception as e:
+        backend_logger.error(f"保存报警事件视频失败: {e}")
+        return None
+
+
+def save_alarm_event_image(track_id, zone_id, zone_name, class_id, class_name_cn, bbox_center):
+    """保存报警事件图片"""
+    try:
+        if not alarm_config.get('save_event_image', True):
+            return None
+        
+        if latest_annotated_frame is None:
+            return None
+        
+        event_path = alarm_config.get('event_save_path', os.path.join(BASE_DIR, "alarm_events"))
+        image_dir = os.path.join(event_path, "images")
+        os.makedirs(image_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        object_name = class_name_cn if class_name_cn else f"class_{class_id}"
+        # 清理文件名中的非法字符
+        safe_zone_name = zone_name.replace('/', '_').replace('\\', '_').replace(':', '_')
+        safe_object_name = object_name.replace('/', '_').replace('\\', '_').replace(':', '_')
+        filename = f"alarm_{timestamp}_ID{track_id}_{safe_object_name}_{safe_zone_name}.jpg"
+        filepath = os.path.join(image_dir, filename)
+        
+        # 保存处理后的帧（包含检测框和区域）
+        frame = latest_annotated_frame.copy()
+        
+        # 在图片上添加报警信息文字
+        pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_image)
+        
+        # 加载字体
+        font_size = display_config.get('font_size', 16)
+        font = None
+        font_paths = [
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/truetype/arphic/uming.ttc",
+            "/usr/share/fonts/truetype/arphic/ukai.ttc",
+            "/System/Library/Fonts/PingFang.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        ]
+        for font_path in font_paths:
+            if os.path.exists(font_path):
+                try:
+                    font = ImageFont.truetype(font_path, font_size)
+                    break
+                except:
+                    continue
+        if font is None:
+            font = ImageFont.load_default()
+        
+        # 绘制报警信息
+        info_text = f"报警时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n目标: {object_name} (ID: {track_id})\n区域: {safe_zone_name}"
+        bbox = draw.textbbox((0, 0), info_text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        padding = 10
+        
+        # 绘制文字背景
+        bg_x1 = 10
+        bg_y1 = 10
+        bg_x2 = bg_x1 + text_width + padding * 2
+        bg_y2 = bg_y1 + text_height + padding * 2
+        draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=(0, 0, 0, 200))
+        
+        # 绘制文字
+        draw.text((bg_x1 + padding, bg_y1 + padding), info_text, fill=(255, 255, 255), font=font)
+        
+        # 转换回OpenCV格式并保存
+        frame_rgb = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+        cv2.imwrite(filepath, frame_rgb, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        
+        backend_logger.info(f"报警事件图片已保存: {filename}")
+        return filename
+        
+    except Exception as e:
+        backend_logger.error(f"保存报警事件图片失败: {e}")
+        return None
+
+
 def trigger_alarm(track_id, bbox_center, zone_id, zone_name, class_id=None, class_name_cn=None):
     """触发报警"""
     global alarm_triggered, alarm_config
@@ -507,6 +694,14 @@ def trigger_alarm(track_id, bbox_center, zone_id, zone_name, class_id=None, clas
     
     object_name = class_name_cn if class_name_cn else "对象"
     
+    # 保存报警事件（视频和图片）
+    event_video_filename = None
+    event_image_filename = None
+    if alarm_config.get('save_event_video', True):
+        event_video_filename = save_alarm_event_video(track_id, zone_id, zone_name, class_id, class_name_cn, bbox_center)
+    if alarm_config.get('save_event_image', True):
+        event_image_filename = save_alarm_event_image(track_id, zone_id, zone_name, class_id, class_name_cn, bbox_center)
+    
     alarm_data = {
         "time": current_time,
         "track_id": track_id,
@@ -515,7 +710,9 @@ def trigger_alarm(track_id, bbox_center, zone_id, zone_name, class_id=None, clas
         "object_name": object_name,
         "zone_id": zone_id,
         "zone_name": zone_name,
-        "position": {"x": float(bbox_center[0]), "y": float(bbox_center[1])}
+        "position": {"x": float(bbox_center[0]), "y": float(bbox_center[1])},
+        "event_video": event_video_filename,
+        "event_image": event_image_filename
     }
     
     # 通过WebSocket发送报警信息
@@ -2044,6 +2241,33 @@ def set_alarm_config():
             # 如果启用"相同ID只报警一次"，清空之前的报警记录
             if once_per_id:
                 alarm_triggered.clear()
+        
+        if 'save_event_video' in data:
+            alarm_config['save_event_video'] = bool(data['save_event_video'])
+        
+        if 'save_event_image' in data:
+            alarm_config['save_event_image'] = bool(data['save_event_image'])
+        
+        if 'event_video_duration' in data:
+            duration = int(data['event_video_duration'])
+            if duration < 5 or duration > 60:
+                return jsonify({"success": False, "message": "事件视频时长必须在5-60秒之间"}), 400
+            alarm_config['event_video_duration'] = duration
+        
+        if 'event_save_path' in data:
+            event_path = data['event_save_path'].strip()
+            if event_path:
+                # 验证路径是否有效
+                try:
+                    os.makedirs(event_path, exist_ok=True)
+                    os.makedirs(os.path.join(event_path, "videos"), exist_ok=True)
+                    os.makedirs(os.path.join(event_path, "images"), exist_ok=True)
+                    alarm_config['event_save_path'] = event_path
+                except Exception as e:
+                    return jsonify({"success": False, "message": f"保存路径无效: {str(e)}"}), 400
+            else:
+                # 使用默认路径
+                alarm_config['event_save_path'] = os.path.join(BASE_DIR, "alarm_events")
         
         save_alarm_config()
         return jsonify({

@@ -31,3 +31,5 @@ frontend/dist/
 frontend/.DS_Store
 frontend/*.local
 
+# 报警事件文件
+alarm_events/

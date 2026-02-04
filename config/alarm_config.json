@@ -1,5 +1,9 @@
 {
   "debounce_time": 5.0,
   "detection_mode": "edge",
-  "once_per_id": false
+  "once_per_id": false,
+  "save_event_video": true,
+  "save_event_image": true,
+  "event_video_duration": 5,
+  "event_save_path": "/home/nvidia/yzkj/alarm_events"
 }

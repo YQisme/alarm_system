@@ -180,6 +180,46 @@
               启用后，同一ID在整个生命周期内只报警一次
             </span>
           </el-form-item>
+          
+          <el-divider>事件保存设置</el-divider>
+          
+          <el-form-item label="保存事件视频">
+            <el-switch v-model="alarmForm.save_event_video" />
+            <span style="margin-left: 10px; color: #666; font-size: 12px">
+              触发报警时自动保存视频片段
+            </span>
+          </el-form-item>
+          <el-form-item label="保存事件图片">
+            <el-switch v-model="alarmForm.save_event_image" />
+            <span style="margin-left: 10px; color: #666; font-size: 12px">
+              触发报警时自动保存当前画面
+            </span>
+          </el-form-item>
+          <el-form-item label="事件视频时长（秒）" v-if="alarmForm.save_event_video">
+            <el-input-number
+              v-model="alarmForm.event_video_duration"
+              :min="5"
+              :max="60"
+              :step="1"
+            />
+            <span style="margin-left: 10px; color: #666; font-size: 12px">
+              报警时录制的视频时长
+            </span>
+          </el-form-item>
+          <el-form-item label="事件保存路径">
+            <el-input
+              v-model="alarmForm.event_save_path"
+              placeholder="请输入保存路径"
+            >
+              <template #append>
+                <el-button @click="selectEventSavePath">选择</el-button>
+              </template>
+            </el-input>
+            <div style="margin-top: 5px; color: #666; font-size: 12px">
+              视频保存在 videos/ 目录，图片保存在 images/ 目录
+            </div>
+          </el-form-item>
+          
           <el-form-item>
             <el-button type="primary" @click="applyAlarm" :loading="alarmLoading">应用报警设置</el-button>
           </el-form-item>
@@ -220,7 +260,11 @@ const displayForm = ref({
 const alarmForm = ref({
   debounce_time: 5.0,
   detection_mode: 'center',
-  once_per_id: false
+  once_per_id: false,
+  save_event_video: true,
+  save_event_image: true,
+  event_video_duration: 10,
+  event_save_path: ''
 })
 
 const modelLoading = ref(false)
@@ -432,6 +476,18 @@ const loadAlarmConfig = async () => {
     if (res.data.once_per_id !== undefined) {
       alarmForm.value.once_per_id = res.data.once_per_id
     }
+    if (res.data.save_event_video !== undefined) {
+      alarmForm.value.save_event_video = res.data.save_event_video
+    }
+    if (res.data.save_event_image !== undefined) {
+      alarmForm.value.save_event_image = res.data.save_event_image
+    }
+    if (res.data.event_video_duration !== undefined) {
+      alarmForm.value.event_video_duration = res.data.event_video_duration
+    }
+    if (res.data.event_save_path !== undefined) {
+      alarmForm.value.event_save_path = res.data.event_save_path
+    }
   } catch (error) {
     console.error('加载报警配置失败:', error)
   }
@@ -637,13 +693,45 @@ const applyDisplay = async () => {
   }
 }
 
+const selectEventSavePath = async () => {
+  try {
+    const { value: path } = await ElMessageBox.prompt(
+      '请输入事件保存路径（绝对路径）',
+      '选择保存路径',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        inputValue: alarmForm.value.event_save_path,
+        inputValidator: (value) => {
+          if (!value || !value.trim()) {
+            return '路径不能为空'
+          }
+          return true
+        }
+      }
+    )
+    
+    if (path) {
+      alarmForm.value.event_save_path = path.trim()
+    }
+  } catch (error) {
+    if (error !== 'cancel') {
+      console.error('选择路径失败:', error)
+    }
+  }
+}
+
 const applyAlarm = async () => {
   alarmLoading.value = true
   try {
     const res = await axios.post('/api/alarm', {
       debounce_time: alarmForm.value.debounce_time,
       detection_mode: alarmForm.value.detection_mode,
-      once_per_id: alarmForm.value.once_per_id
+      once_per_id: alarmForm.value.once_per_id,
+      save_event_video: alarmForm.value.save_event_video,
+      save_event_image: alarmForm.value.save_event_image,
+      event_video_duration: alarmForm.value.event_video_duration,
+      event_save_path: alarmForm.value.event_save_path
     })
     if (res.data.success) {
       ElMessage.success(res.data.message)
