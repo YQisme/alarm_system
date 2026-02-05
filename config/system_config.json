@@ -2,5 +2,5 @@
   "model": "yolo11m.pt",
   "video_url": "rtsp://admin:scyzkj123456@192.168.0.2:554/h264/ch1/main/av_stream",
   "camera_ip": "192.168.0.2",
-  "camera_check_interval": 10
+  "camera_check_interval": 5
 }

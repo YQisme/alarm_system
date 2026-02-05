@@ -278,7 +278,8 @@ def trigger_camera_offline_alarm(ip):
         "position": {"x": 0, "y": 0},
         "event_video": None,
         "event_image": None,
-        "camera_ip": ip
+        "camera_ip": ip,
+        "alarm_type": "camera_offline"  # 报警类型：摄像头离线
     }
     
     # 通过WebSocket发送报警信息
@@ -913,7 +914,8 @@ def trigger_occlusion_alarm(occlusion_ratio):
         "position": {"x": 0, "y": 0},
         "event_video": None,
         "event_image": None,
-        "occlusion_ratio": round(occlusion_ratio * 100, 2)  # 转换为百分比
+        "occlusion_ratio": round(occlusion_ratio * 100, 2),  # 转换为百分比
+        "alarm_type": "occlusion"  # 报警类型：画面遮挡
     }
     
     # 通过WebSocket发送报警信息
@@ -1019,7 +1021,8 @@ def trigger_alarm(track_id, bbox_center, zone_id, zone_name, class_id=None, clas
         "zone_name": zone_name,
         "position": {"x": float(bbox_center[0]), "y": float(bbox_center[1])},
         "event_video": event_video_filename,
-        "event_image": event_image_filename
+        "event_image": event_image_filename,
+        "alarm_type": "zone"  # 报警类型：区域报警
     }
     
     # 通过WebSocket发送报警信息
