@@ -26,6 +26,49 @@
           <el-form-item label="视频URL">
             <el-input v-model="videoForm.video_url" placeholder="rtsp://..." />
           </el-form-item>
+          <el-form-item label="摄像头IP">
+            <el-input 
+              v-model="videoForm.camera_ip" 
+              placeholder="自动从RTSP URL提取或手动输入"
+              style="width: 300px"
+            />
+            <span style="margin-left: 10px; color: #666; font-size: 12px">
+              留空则自动从RTSP URL中提取
+            </span>
+          </el-form-item>
+          <el-form-item label="摄像头状态">
+            <el-tag 
+              :type="getCameraStatusType(videoForm.camera_status)"
+              size="large"
+            >
+              <el-icon style="margin-right: 5px">
+                <CircleCheck v-if="videoForm.camera_status === 'online'" />
+                <CircleClose v-else-if="videoForm.camera_status === 'offline'" />
+                <QuestionFilled v-else />
+              </el-icon>
+              {{ getCameraStatusText(videoForm.camera_status) }}
+            </el-tag>
+            <el-button 
+              size="small" 
+              style="margin-left: 10px"
+              @click="checkCameraStatus"
+              :loading="statusChecking"
+            >
+              检测状态
+            </el-button>
+          </el-form-item>
+          <el-form-item label="检测间隔（秒）">
+            <el-input-number
+              v-model="videoForm.camera_check_interval"
+              :min="1"
+              :max="300"
+              :step="1"
+              style="width: 150px"
+            />
+            <span style="margin-left: 10px; color: #666; font-size: 12px">
+              摄像头状态检测的时间间隔，最小1秒
+            </span>
+          </el-form-item>
           <el-form-item>
             <el-button type="primary" @click="applyVideo" :loading="videoLoading">应用</el-button>
           </el-form-item>
@@ -230,8 +273,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, watch, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { CircleCheck, CircleClose, QuestionFilled } from '@element-plus/icons-vue'
 import axios from 'axios'
 
 const emit = defineEmits(['model-changed', 'video-changed', 'classes-changed', 'display-changed', 'alarm-changed'])
@@ -242,7 +286,14 @@ const classesData = ref([])
 const enabledClasses = ref([])
 
 const modelForm = ref({ model: '' })
-const videoForm = ref({ video_url: '' })
+const videoForm = ref({ 
+  video_url: '',
+  camera_ip: '',
+  camera_status: 'unknown',
+  camera_check_interval: 5
+})
+const statusChecking = ref(false)
+let statusCheckInterval = null
 const displayForm = ref({
   font_size: 16,
   box_thickness: 2,
@@ -382,6 +433,17 @@ onMounted(() => {
   loadClasses()
   loadDisplayConfig()
   loadAlarmConfig()
+  
+  // 每5秒自动更新摄像头状态
+  statusCheckInterval = setInterval(() => {
+    checkCameraStatus()
+  }, 5000)
+})
+
+onUnmounted(() => {
+  if (statusCheckInterval) {
+    clearInterval(statusCheckInterval)
+  }
 })
 
 const loadModels = async () => {
@@ -404,8 +466,63 @@ const loadVideoUrl = async () => {
     if (res.data.video_url) {
       videoForm.value.video_url = res.data.video_url
     }
+    if (res.data.camera_ip) {
+      videoForm.value.camera_ip = res.data.camera_ip
+    }
+    if (res.data.camera_status) {
+      videoForm.value.camera_status = res.data.camera_status
+    }
+    if (res.data.camera_check_interval) {
+      videoForm.value.camera_check_interval = res.data.camera_check_interval
+    }
   } catch (error) {
-    console.error('加载视频URL失败:', error)
+    console.error('加载视频配置失败:', error)
+  }
+}
+
+// 获取摄像头状态类型
+const getCameraStatusType = (status) => {
+  switch (status) {
+    case 'online':
+      return 'success'
+    case 'offline':
+      return 'danger'
+    default:
+      return 'info'
+  }
+}
+
+// 获取摄像头状态文本
+const getCameraStatusText = (status) => {
+  switch (status) {
+    case 'online':
+      return '在线'
+    case 'offline':
+      return '离线'
+    default:
+      return '未知'
+  }
+}
+
+// 检测摄像头状态
+const checkCameraStatus = async () => {
+  statusChecking.value = true
+  try {
+    const res = await axios.get('/api/video')
+    if (res.data.camera_status) {
+      videoForm.value.camera_status = res.data.camera_status
+      if (res.data.camera_ip) {
+        videoForm.value.camera_ip = res.data.camera_ip
+      }
+      if (res.data.camera_check_interval) {
+        videoForm.value.camera_check_interval = res.data.camera_check_interval
+      }
+    }
+  } catch (error) {
+    console.error('检测摄像头状态失败:', error)
+    ElMessage.error('检测摄像头状态失败')
+  } finally {
+    statusChecking.value = false
   }
 }
 
@@ -540,17 +657,31 @@ const applyVideo = async () => {
     )
     
     videoLoading.value = true
-    const res = await axios.post('/api/video', { video_url: videoForm.value.video_url })
+    const res = await axios.post('/api/video', { 
+      video_url: videoForm.value.video_url,
+      camera_ip: videoForm.value.camera_ip || '',
+      camera_check_interval: videoForm.value.camera_check_interval
+    })
     if (res.data.success) {
       ElMessage.success(res.data.message)
+      // 更新状态（包括空字符串）
+      if (res.data.camera_ip !== undefined) {
+        videoForm.value.camera_ip = res.data.camera_ip
+      }
+      if (res.data.camera_status) {
+        videoForm.value.camera_status = res.data.camera_status
+      }
+      if (res.data.camera_check_interval) {
+        videoForm.value.camera_check_interval = res.data.camera_check_interval
+      }
       emit('video-changed')
     } else {
       ElMessage.error('设置失败: ' + res.data.message)
     }
   } catch (error) {
     if (error !== 'cancel') {
-      console.error('设置视频URL失败:', error)
-      ElMessage.error('设置视频URL失败')
+      console.error('设置视频配置失败:', error)
+      ElMessage.error('设置视频配置失败')
     }
   } finally {
     videoLoading.value = false

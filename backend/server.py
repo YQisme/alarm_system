@@ -14,6 +14,8 @@ from ultralytics import YOLO
 from PIL import Image, ImageDraw, ImageFont
 import subprocess
 import signal
+import re
+import socket
 
 # 获取项目根目录路径（backend/ 的父目录）
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -198,12 +200,133 @@ model_lock = threading.Lock()  # 模型访问锁
 video_lock = threading.Lock()  # 视频路径访问锁
 current_model_name = "yolo26m_640_int8.engine"  # 当前模型文件名
 video_path = "rtsp://admin:scyzkj123456@192.168.1.2:554/h264/ch1/main/av_stream"  # 视频路径
+camera_ip = ""  # 摄像头IP地址
+camera_status = "unknown"  # 摄像头状态：online/offline/unknown
+camera_status_lock = threading.Lock()  # 摄像头状态锁
+camera_check_interval = 5  # 摄像头检测间隔（秒）
+camera_last_status = "unknown"  # 上次检测到的状态，用于判断状态变化
+camera_offline_alarm_triggered = {}  # 摄像头离线报警记录，用于防抖
 model = None  # 模型对象，延迟加载
+
+# 从RTSP URL中提取IP地址
+def extract_ip_from_rtsp(rtsp_url):
+    """从RTSP URL中提取IP地址"""
+    try:
+        # 匹配 rtsp://username:password@ip:port/path 格式
+        match = re.search(r'@([\d.]+):', rtsp_url)
+        if match:
+            return match.group(1)
+        # 匹配 rtsp://ip:port/path 格式
+        match = re.search(r'rtsp://([\d.]+):', rtsp_url)
+        if match:
+            return match.group(1)
+    except Exception as e:
+        backend_logger.error(f"提取IP地址失败: {e}")
+    return None
+
+# 检测IP是否在线（使用ping）
+def ping_ip(ip, timeout=2):
+    """使用ping检测IP是否在线"""
+    try:
+        # 使用ping命令检测（Linux系统）
+        result = subprocess.run(
+            ['ping', '-c', '1', '-W', str(timeout), ip],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout + 1
+        )
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
+    except Exception as e:
+        backend_logger.error(f"Ping检测失败: {e}")
+        return False
+
+# 触发摄像头离线报警
+def trigger_camera_offline_alarm(ip):
+    """触发摄像头离线报警"""
+    global camera_offline_alarm_triggered, alarm_config
+    
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    alarm_key = f"camera_offline_{ip}"
+    
+    # 使用防抖时间机制，避免频繁报警
+    debounce_time = alarm_config.get('debounce_time', 5.0)
+    if alarm_key in camera_offline_alarm_triggered:
+        # 检查是否在防抖时间内
+        if time.time() - camera_offline_alarm_triggered[alarm_key] < debounce_time:
+            return False
+    camera_offline_alarm_triggered[alarm_key] = time.time()
+    
+    alarm_data = {
+        "time": current_time,
+        "track_id": -1,
+        "class_id": None,
+        "class_name_cn": "摄像头离线",
+        "object_name": "摄像头离线",
+        "zone_id": "system",
+        "zone_name": "系统报警",
+        "position": {"x": 0, "y": 0},
+        "event_video": None,
+        "event_image": None,
+        "camera_ip": ip
+    }
+    
+    # 通过WebSocket发送报警信息
+    socketio.emit('alarm', alarm_data)
+    backend_logger.warning(f"⚠️  摄像头离线报警！IP: {ip}, 时间: {current_time}")
+    return True
+
+# 摄像头状态检测线程
+def camera_status_checker():
+    """定期检测摄像头在线状态"""
+    global camera_status, camera_ip, camera_last_status, camera_check_interval
+    
+    while not stop_flag.is_set():
+        try:
+            with camera_status_lock:
+                current_ip = camera_ip
+                current_interval = camera_check_interval
+            
+            # 在锁外提取IP，避免长时间持有锁
+            if not current_ip:
+                # 如果没有配置IP，尝试从RTSP URL中提取
+                with video_lock:
+                    current_rtsp = video_path
+                extracted_ip = extract_ip_from_rtsp(current_rtsp)
+                if extracted_ip:
+                    # 使用锁保护IP的更新
+                    with camera_status_lock:
+                        camera_ip = extracted_ip
+                        current_ip = extracted_ip
+            
+            if current_ip:
+                is_online = ping_ip(current_ip, timeout=2)
+                previous_status = camera_last_status
+                with camera_status_lock:
+                    camera_status = "online" if is_online else "offline"
+                    camera_last_status = camera_status
+                
+                # 如果状态从在线变为离线，触发报警
+                if previous_status == "online" and camera_status == "offline":
+                    trigger_camera_offline_alarm(current_ip)
+            else:
+                with camera_status_lock:
+                    camera_status = "unknown"
+                    camera_last_status = "unknown"
+        except Exception as e:
+            backend_logger.error(f"摄像头状态检测异常: {e}")
+            with camera_status_lock:
+                camera_status = "unknown"
+                camera_last_status = "unknown"
+        
+        # 使用配置的检测间隔
+        time.sleep(current_interval)
 
 # 加载系统配置
 def load_system_config():
     """从配置文件加载系统配置"""
-    global current_model_name, video_path, model
+    global current_model_name, video_path, camera_ip, model
     if os.path.exists(config_file):
         try:
             with open(config_file, 'r') as f:
@@ -212,18 +335,30 @@ def load_system_config():
                     current_model_name = config['model']
                 if 'video_url' in config:
                     video_path = config['video_url']
+                if 'camera_ip' in config:
+                    camera_ip = config['camera_ip']
                 backend_logger.info(f"已从 {config_file} 加载系统配置")
         except Exception as e:
             backend_logger.error(f"加载系统配置文件失败: {e}")
+    
+    # 如果没有配置IP，尝试从RTSP URL中提取
+    if not camera_ip:
+        extracted_ip = extract_ip_from_rtsp(video_path)
+        if extracted_ip:
+            camera_ip = extracted_ip
+            backend_logger.info(f"从RTSP URL中提取IP地址: {camera_ip}")
     
     # 加载模型
     load_model()
 
 def save_system_config():
     """保存系统配置到文件"""
+    global camera_ip, camera_check_interval
     config = {
         "model": current_model_name,
-        "video_url": video_path
+        "video_url": video_path,
+        "camera_ip": camera_ip,
+        "camera_check_interval": camera_check_interval
     }
     try:
         with open(config_file, 'w') as f:
@@ -850,21 +985,21 @@ def detection_worker():
                                         if len(zone_points) < 3:
                                             continue
                                         
-                                        in_zone = False
-                                        if detection_mode == 'center':
-                                            # 中心点模式：检查中心点是否在多边形内
-                                            in_zone = is_point_in_polygon(bbox_center, zone_points)
-                                        elif detection_mode == 'edge':
-                                            # 边框任意点模式：检查检测框是否与多边形有交集
-                                            in_zone = is_bbox_in_polygon([x1, y1, x2, y2], zone_points)
-                                        
-                                        if in_zone:
-                                            track_id = int(track_ids[i])
-                                            class_name_cn = get_class_name_cn(cls_id)
-                                            zone_id = zone.get('id', 'unknown')
-                                            zone_name = zone.get('name', '未知区域')
-                                            trigger_alarm(track_id, bbox_center, zone_id, zone_name, cls_id, class_name_cn)
-                                            break  # 只对第一个匹配的区域报警
+                                    in_zone = False
+                                    if detection_mode == 'center':
+                                        # 中心点模式：检查中心点是否在多边形内
+                                        in_zone = is_point_in_polygon(bbox_center, zone_points)
+                                    elif detection_mode == 'edge':
+                                        # 边框任意点模式：检查检测框是否与多边形有交集
+                                        in_zone = is_bbox_in_polygon([x1, y1, x2, y2], zone_points)
+                                    
+                                    if in_zone:
+                                        track_id = int(track_ids[i])
+                                        class_name_cn = get_class_name_cn(cls_id)
+                                        zone_id = zone.get('id', 'unknown')
+                                        zone_name = zone.get('name', '未知区域')
+                                        trigger_alarm(track_id, bbox_center, zone_id, zone_name, cls_id, class_name_cn)
+                                        break  # 只对第一个匹配的区域报警
             
             # 手动绘制检测框（只显示启用的类别）
             annotated_frame = frame.copy()
@@ -895,13 +1030,13 @@ def detection_worker():
                                         zone_points = zone.get('points', [])
                                         if len(zone_points) < 3:
                                             continue
-                                        if detection_mode == 'center':
-                                            # 中心点模式：检查中心点是否在多边形内
+                                    if detection_mode == 'center':
+                                        # 中心点模式：检查中心点是否在多边形内
                                             if is_point_in_polygon(bbox_center, zone_points):
                                                 in_zone = True
                                                 break
-                                        elif detection_mode == 'edge':
-                                            # 边框任意点模式：检查检测框是否与多边形有交集
+                                    elif detection_mode == 'edge':
+                                        # 边框任意点模式：检查检测框是否与多边形有交集
                                             if is_bbox_in_polygon([x1, y1, x2, y2], zone_points):
                                                 in_zone = True
                                                 break
@@ -1146,6 +1281,10 @@ reader_thread.start()
 # 启动检测线程
 detection_thread = threading.Thread(target=detection_worker, daemon=True)
 detection_thread.start()
+
+# 启动摄像头状态检测线程
+camera_status_thread = threading.Thread(target=camera_status_checker, daemon=True)
+camera_status_thread.start()
 
 # MJPEG视频流生成器（不经过YOLO处理）
 def generate_raw_video_stream():
@@ -1632,18 +1771,31 @@ def set_model():
 
 @app.route('/api/video', methods=['GET'])
 def get_video():
-    """获取当前视频URL"""
+    """获取当前视频URL和摄像头状态"""
     with video_lock:
-        return jsonify({"video_url": video_path})
+        video_url = video_path
+    with camera_status_lock:
+        status = camera_status
+        ip = camera_ip
+        interval = camera_check_interval
+    
+    return jsonify({
+        "video_url": video_url,
+        "camera_ip": ip,
+        "camera_status": status,
+        "camera_check_interval": interval
+    })
 
 
 @app.route('/api/video', methods=['POST'])
 def set_video():
-    """设置视频URL"""
-    global video_path
+    """设置视频URL、摄像头IP和检测间隔"""
+    global video_path, camera_ip, camera_check_interval
     
     data = request.json
     new_video_url = data.get('video_url')
+    new_camera_ip = data.get('camera_ip', '')
+    new_check_interval = data.get('camera_check_interval')
     
     if not new_video_url:
         return jsonify({"success": False, "message": "未指定视频URL"}), 400
@@ -1651,14 +1803,48 @@ def set_video():
     try:
         with video_lock:
             video_path = new_video_url
+        
+        # 使用锁保护IP和间隔的修改，避免与检测线程冲突
+        with camera_status_lock:
+            # 处理摄像头IP：如果请求中明确提供了camera_ip字段，使用提供的值（即使是空字符串）
+            # 否则从RTSP URL中提取
+            if 'camera_ip' in data:
+                # 明确提供了IP字段，使用提供的值（允许为空字符串）
+                camera_ip = new_camera_ip.strip() if new_camera_ip else ""
+            else:
+                # 没有提供IP字段，从RTSP URL中提取
+                extracted_ip = extract_ip_from_rtsp(new_video_url)
+                if extracted_ip:
+                    camera_ip = extracted_ip
+                else:
+                    camera_ip = ""
+            
+            # 更新检测间隔
+            if new_check_interval is not None:
+                interval = int(new_check_interval)
+                if interval < 1:
+                    interval = 1  # 最小1秒
+                camera_check_interval = interval
+        
         save_system_config()
+        
+        # 立即检测一次状态（在锁外执行ping，避免阻塞）
+        if camera_ip:
+            is_online = ping_ip(camera_ip, timeout=2)
+            with camera_status_lock:
+                camera_status = "online" if is_online else "offline"
+                camera_last_status = camera_status
+        
         return jsonify({
             "success": True,
-            "message": "视频URL已更新",
-            "video_url": video_path
+            "message": "视频配置已更新",
+            "video_url": video_path,
+            "camera_ip": camera_ip,
+            "camera_status": camera_status,
+            "camera_check_interval": camera_check_interval
         })
     except Exception as e:
-        return jsonify({"success": False, "message": f"设置视频URL失败: {str(e)}"}), 500
+        return jsonify({"success": False, "message": f"设置视频配置失败: {str(e)}"}), 500
 
 
 @app.route('/api/classes', methods=['GET'])
