@@ -190,6 +190,45 @@
         </el-form>
       </el-tab-pane>
 
+      <!-- 遮挡检测配置 -->
+      <el-tab-pane label="遮挡检测" name="occlusion">
+        <el-form :model="occlusionForm" label-width="150px">
+          <el-form-item label="启用遮挡检测">
+            <el-switch v-model="occlusionForm.enabled" />
+            <span style="margin-left: 10px; color: #666; font-size: 12px">
+              启用后，系统会自动检测视频画面是否被遮挡
+            </span>
+          </el-form-item>
+          <el-form-item label="检测间隔（秒）">
+            <el-input-number
+              v-model="occlusionForm.check_interval"
+              :min="0.5"
+              :max="300"
+              :step="0.5"
+              :precision="1"
+            />
+            <span style="margin-left: 10px; color: #666; font-size: 12px">
+              两次检测之间的时间间隔
+            </span>
+          </el-form-item>
+          <el-form-item label="遮挡率阈值">
+            <el-input-number
+              v-model="occlusionForm.occlusion_threshold"
+              :min="0"
+              :max="1"
+              :step="0.01"
+              :precision="2"
+            />
+            <span style="margin-left: 10px; color: #666; font-size: 12px">
+              遮挡率超过该值将触发报警（0-1之间，例如0.3表示30%）
+            </span>
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" @click="applyOcclusion" :loading="occlusionLoading">应用遮挡检测设置</el-button>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+
       <!-- 报警配置 -->
       <el-tab-pane label="报警设置" name="alarm">
         <el-form :model="alarmForm" label-width="150px">
@@ -317,12 +356,18 @@ const alarmForm = ref({
   event_video_duration: 10,
   event_save_path: ''
 })
+const occlusionForm = ref({
+  enabled: false,
+  check_interval: 5.0,
+  occlusion_threshold: 0.3
+})
 
 const modelLoading = ref(false)
 const videoLoading = ref(false)
 const classesLoading = ref(false)
 const displayLoading = ref(false)
 const alarmLoading = ref(false)
+const occlusionLoading = ref(false)
 
 // RGB 和 Hex 转换
 const rgbToHex = (r, g, b) => {
@@ -433,6 +478,7 @@ onMounted(() => {
   loadClasses()
   loadDisplayConfig()
   loadAlarmConfig()
+  loadOcclusionConfig()
   
   // 每5秒自动更新摄像头状态
   statusCheckInterval = setInterval(() => {
@@ -607,6 +653,23 @@ const loadAlarmConfig = async () => {
     }
   } catch (error) {
     console.error('加载报警配置失败:', error)
+  }
+}
+
+const loadOcclusionConfig = async () => {
+  try {
+    const res = await axios.get('/api/occlusion')
+    if (res.data.enabled !== undefined) {
+      occlusionForm.value.enabled = res.data.enabled
+    }
+    if (res.data.check_interval !== undefined) {
+      occlusionForm.value.check_interval = res.data.check_interval
+    }
+    if (res.data.occlusion_threshold !== undefined) {
+      occlusionForm.value.occlusion_threshold = res.data.occlusion_threshold
+    }
+  } catch (error) {
+    console.error('加载遮挡检测配置失败:', error)
   }
 }
 
@@ -875,6 +938,27 @@ const applyAlarm = async () => {
     ElMessage.error('设置失败')
   } finally {
     alarmLoading.value = false
+  }
+}
+
+const applyOcclusion = async () => {
+  occlusionLoading.value = true
+  try {
+    const res = await axios.post('/api/occlusion', {
+      enabled: occlusionForm.value.enabled,
+      check_interval: occlusionForm.value.check_interval,
+      occlusion_threshold: occlusionForm.value.occlusion_threshold
+    })
+    if (res.data.success) {
+      ElMessage.success(res.data.message)
+    } else {
+      ElMessage.error('设置失败: ' + res.data.message)
+    }
+  } catch (error) {
+    console.error('设置遮挡检测配置失败:', error)
+    ElMessage.error('设置失败')
+  } finally {
+    occlusionLoading.value = false
   }
 }
 </script>

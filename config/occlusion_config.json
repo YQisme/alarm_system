@@ -1,7 +1,5 @@
 {
-  "min_brightness": 10,
-  "max_brightness": 245,
-  "min_variance": 50,
-  "min_laplacian": 100,
-  "min_frame_diff": 5
+  "enabled": true,
+  "check_interval": 5.0,
+  "occlusion_threshold": 0.5
 }

@@ -111,12 +111,21 @@ alarm_config = {
     "event_save_path": os.path.join(BASE_DIR, "alarm_events")  # 报警事件保存路径
 }
 
+# 遮挡检测配置
+occlusion_config = {
+    "enabled": False,  # 是否启用遮挡检测
+    "check_interval": 5.0,  # 检测间隔（秒）
+    "occlusion_threshold": 0.3  # 遮挡率阈值（0-1），超过该值就报警
+}
+occlusion_alarm_triggered = {}  # 遮挡报警记录，用于防抖
+
 zones_config_file = os.path.join(CONFIG_DIR, "zones_config.json")  # 多区域配置文件
 config_file = os.path.join(CONFIG_DIR, "system_config.json")  # 系统配置文件
 classes_config_file = os.path.join(CONFIG_DIR, "classes_config.json")  # 类别配置文件
 display_config_file = os.path.join(CONFIG_DIR, "display_config.json")  # 显示配置文件
 model_classes_file = os.path.join(CONFIG_DIR, "model_classes.json")  # 模型类别映射配置文件
 alarm_config_file = os.path.join(CONFIG_DIR, "alarm_config.json")  # 报警配置文件
+occlusion_config_file = os.path.join(CONFIG_DIR, "occlusion_config.json")  # 遮挡检测配置文件
 latest_frame = None  # 最新帧
 latest_results = None  # 最新检测结果
 latest_annotated_frame = None  # 最新处理后的帧（包含YOLO检测结果和区域绘制）
@@ -588,11 +597,39 @@ def save_alarm_config():
     except Exception as e:
         backend_logger.error(f"保存报警配置失败: {e}")
 
+# 遮挡检测配置管理
+def load_occlusion_config():
+    """从配置文件加载遮挡检测配置"""
+    global occlusion_config
+    if os.path.exists(occlusion_config_file):
+        try:
+            with open(occlusion_config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                if 'enabled' in config:
+                    occlusion_config['enabled'] = bool(config['enabled'])
+                if 'check_interval' in config:
+                    occlusion_config['check_interval'] = float(config['check_interval'])
+                if 'occlusion_threshold' in config:
+                    occlusion_config['occlusion_threshold'] = float(config['occlusion_threshold'])
+                backend_logger.info(f"已从 {occlusion_config_file} 加载遮挡检测配置")
+        except Exception as e:
+            backend_logger.error(f"加载遮挡检测配置文件失败: {e}")
+
+def save_occlusion_config():
+    """保存遮挡检测配置到文件"""
+    try:
+        with open(occlusion_config_file, 'w', encoding='utf-8') as f:
+            json.dump(occlusion_config, f, indent=2, ensure_ascii=False)
+        backend_logger.info(f"遮挡检测配置已保存到 {occlusion_config_file}")
+    except Exception as e:
+        backend_logger.error(f"保存遮挡检测配置失败: {e}")
+
 # 初始化加载配置和模型
 load_system_config()
 load_classes_config()
 load_display_config()
 load_alarm_config()
+load_occlusion_config()
 
 
 def is_point_in_polygon(point, polygon):
@@ -798,6 +835,141 @@ def save_alarm_event_image(track_id, zone_id, zone_name, class_id, class_name_cn
         backend_logger.error(f"保存报警事件图片失败: {e}")
         return None
 
+
+def detect_occlusion(frame1, frame2):
+    """检测两帧之间的遮挡情况
+    
+    Args:
+        frame1: 第一帧（BGR格式）
+        frame2: 第二帧（BGR格式）
+    
+    Returns:
+        occlusion_ratio: 遮挡率（0-1）
+    """
+    if frame1 is None or frame2 is None:
+        return 0.0
+    
+    try:
+        # 转换为灰度图
+        gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+        
+        # 计算帧差
+        diff = cv2.absdiff(gray1, gray2)
+        
+        # 二值化处理，偏黑的部分（遮挡区域）会被标记为前景
+        # 使用自适应阈值，更好地处理不同光照条件
+        _, binary = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
+        
+        # 形态学操作，去除噪声
+        kernel = np.ones((5, 5), np.uint8)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+        
+        # 连通区域检测
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        
+        # 计算最大连通区域的面积
+        max_area = 0
+        if num_labels > 1:  # 至少有1个连通区域（背景）
+            # 跳过背景（标签0），查找最大连通区域
+            for i in range(1, num_labels):
+                area = stats[i, cv2.CC_STAT_AREA]
+                if area > max_area:
+                    max_area = area
+        
+        # 计算遮挡率（最大连通区域面积 / 总像素数）
+        total_pixels = frame1.shape[0] * frame1.shape[1]
+        occlusion_ratio = max_area / total_pixels if total_pixels > 0 else 0.0
+        
+        return occlusion_ratio
+    except Exception as e:
+        backend_logger.error(f"遮挡检测异常: {e}")
+        return 0.0
+
+def trigger_occlusion_alarm(occlusion_ratio):
+    """触发遮挡报警"""
+    global occlusion_alarm_triggered, alarm_config
+    
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    alarm_key = "occlusion_detection"
+    
+    # 使用防抖时间机制，避免频繁报警
+    debounce_time = alarm_config.get('debounce_time', 5.0)
+    if alarm_key in occlusion_alarm_triggered:
+        # 检查是否在防抖时间内
+        if time.time() - occlusion_alarm_triggered[alarm_key] < debounce_time:
+            return False
+    occlusion_alarm_triggered[alarm_key] = time.time()
+    
+    alarm_data = {
+        "time": current_time,
+        "track_id": -1,
+        "class_id": None,
+        "class_name_cn": "画面遮挡",
+        "object_name": "画面遮挡",
+        "zone_id": "system",
+        "zone_name": "系统报警",
+        "position": {"x": 0, "y": 0},
+        "event_video": None,
+        "event_image": None,
+        "occlusion_ratio": round(occlusion_ratio * 100, 2)  # 转换为百分比
+    }
+    
+    # 通过WebSocket发送报警信息
+    socketio.emit('alarm', alarm_data)
+    backend_logger.warning(f"⚠️  画面遮挡报警！遮挡率: {occlusion_ratio*100:.2f}%, 时间: {current_time}")
+    return True
+
+def occlusion_detector():
+    """遮挡检测线程"""
+    global latest_frame, occlusion_config
+    
+    last_frame = None
+    last_check_time = 0
+    
+    while not stop_flag.is_set():
+        try:
+            # 检查是否启用遮挡检测
+            if not occlusion_config.get('enabled', False):
+                time.sleep(1)
+                continue
+            
+            check_interval = occlusion_config.get('check_interval', 5.0)
+            current_time = time.time()
+            
+            # 检查是否到了检测时间
+            if current_time - last_check_time >= check_interval:
+                # 获取当前帧
+                current_frame = latest_frame
+                
+                if current_frame is not None:
+                    if last_frame is not None:
+                        # 检测遮挡
+                        occlusion_ratio = detect_occlusion(last_frame, current_frame)
+                        
+                        # 检查是否超过阈值
+                        threshold = occlusion_config.get('occlusion_threshold', 0.3)
+                        if occlusion_ratio > threshold:
+                            trigger_occlusion_alarm(occlusion_ratio)
+                            backend_logger.info(f"检测到画面遮挡，遮挡率: {occlusion_ratio*100:.2f}%")
+                        else:
+                            backend_logger.debug(f"遮挡检测正常，遮挡率: {occlusion_ratio*100:.2f}%")
+                    
+                    # 更新上一帧
+                    last_frame = current_frame.copy()
+                    last_check_time = current_time
+                else:
+                    # 如果没有帧，等待一段时间再试
+                    time.sleep(0.5)
+        except Exception as e:
+            backend_logger.error(f"遮挡检测线程异常: {e}")
+            time.sleep(1)
+        
+        # 短暂休眠，避免CPU占用过高
+        time.sleep(0.1)
+    
+    backend_logger.info("遮挡检测线程已停止")
 
 def trigger_alarm(track_id, bbox_center, zone_id, zone_name, class_id=None, class_name_cn=None):
     """触发报警"""
@@ -1286,6 +1458,9 @@ detection_thread.start()
 camera_status_thread = threading.Thread(target=camera_status_checker, daemon=True)
 camera_status_thread.start()
 
+# 启动遮挡检测线程
+occlusion_detector_thread = threading.Thread(target=occlusion_detector, daemon=True)
+occlusion_detector_thread.start()
 # MJPEG视频流生成器（不经过YOLO处理）
 def generate_raw_video_stream():
     """生成原始RTSP视频流的MJPEG流"""
@@ -1896,6 +2071,48 @@ def set_enabled_classes():
             "message": f"已启用 {len(enabled_classes)} 个类别",
             "enabled_classes": enabled_classes
         })
+    except Exception as e:
+        return jsonify({"success": False, "message": f"设置失败: {str(e)}"}), 500
+
+
+@app.route('/api/occlusion', methods=['GET'])
+def get_occlusion_config():
+    """获取遮挡检测配置"""
+    return jsonify(occlusion_config)
+
+@app.route('/api/occlusion', methods=['POST'])
+def set_occlusion_config():
+    """设置遮挡检测配置"""
+    global occlusion_config
+    
+    data = request.json
+    
+    try:
+        if 'enabled' in data:
+            occlusion_config['enabled'] = bool(data['enabled'])
+        
+        if 'check_interval' in data:
+            check_interval = float(data['check_interval'])
+            if check_interval < 0.5:
+                return jsonify({"success": False, "message": "检测间隔不能少于0.5秒"}), 400
+            if check_interval > 300:
+                return jsonify({"success": False, "message": "检测间隔不能超过300秒"}), 400
+            occlusion_config['check_interval'] = check_interval
+        
+        if 'occlusion_threshold' in data:
+            threshold = float(data['occlusion_threshold'])
+            if threshold < 0 or threshold > 1:
+                return jsonify({"success": False, "message": "遮挡率阈值必须在0-1之间"}), 400
+            occlusion_config['occlusion_threshold'] = threshold
+        
+        save_occlusion_config()
+        return jsonify({
+            "success": True,
+            "message": "遮挡检测配置已更新",
+            "config": occlusion_config
+        })
+    except ValueError:
+        return jsonify({"success": False, "message": "参数格式错误"}), 400
     except Exception as e:
         return jsonify({"success": False, "message": f"设置失败: {str(e)}"}), 500
 
