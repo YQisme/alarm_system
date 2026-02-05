@@ -17,6 +17,12 @@ import subprocess
 import signal
 import re
 import socket
+try:
+    import paho.mqtt.client as mqtt
+    MQTT_AVAILABLE = True
+except ImportError:
+    MQTT_AVAILABLE = False
+    backend_logger.warning("MQTT库未安装，MQTT功能将不可用。请运行: pip install paho-mqtt")
 
 # 获取项目根目录路径（backend/ 的父目录）
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -123,12 +129,25 @@ occlusion_config = {
 }
 occlusion_alarm_triggered = {}  # 遮挡报警记录，用于防抖
 
+# MQTT配置
+mqtt_config = {
+    "enabled": False,  # 是否启用MQTT
+    "host": "192.168.0.9",  # MQTT服务器地址
+    "port": 1883,  # MQTT服务器端口
+    "topic": "CAM1",  # MQTT主题
+    "username": "",  # MQTT用户名（可选）
+    "password": ""  # MQTT密码（可选）
+}
+mqtt_client = None  # MQTT客户端对象
+mqtt_lock = threading.Lock()  # MQTT操作锁
+
 # 登录配置
 login_config = {
     "username": "admin",  # 默认用户名
     "password": "123456"  # 默认密码
 }
 login_config_file = os.path.join(CONFIG_DIR, "login_config.json")  # 登录配置文件
+mqtt_config_file = os.path.join(CONFIG_DIR, "mqtt_config.json")  # MQTT配置文件
 
 zones_config_file = os.path.join(CONFIG_DIR, "zones_config.json")  # 多区域配置文件
 config_file = os.path.join(CONFIG_DIR, "system_config.json")  # 系统配置文件
@@ -296,6 +315,10 @@ def trigger_camera_offline_alarm(ip):
     # 通过WebSocket发送报警信息
     socketio.emit('alarm', alarm_data)
     backend_logger.warning(f"⚠️  摄像头离线报警！IP: {ip}, 时间: {current_time}")
+    
+    # 发送MQTT消息
+    send_mqtt_message({"isOffline": 1})
+    
     return True
 
 # 摄像头状态检测线程
@@ -660,6 +683,134 @@ def save_login_config():
     except Exception as e:
         backend_logger.error(f"保存登录配置失败: {e}")
 
+# MQTT配置管理
+def load_mqtt_config():
+    """从配置文件加载MQTT配置"""
+    global mqtt_config
+    if os.path.exists(mqtt_config_file):
+        try:
+            with open(mqtt_config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                if 'enabled' in config:
+                    mqtt_config['enabled'] = bool(config['enabled'])
+                if 'host' in config:
+                    mqtt_config['host'] = config['host']
+                if 'port' in config:
+                    mqtt_config['port'] = int(config['port'])
+                if 'topic' in config:
+                    mqtt_config['topic'] = config['topic']
+                if 'username' in config:
+                    mqtt_config['username'] = config['username']
+                if 'password' in config:
+                    mqtt_config['password'] = config['password']
+                backend_logger.info(f"已从 {mqtt_config_file} 加载MQTT配置")
+        except Exception as e:
+            backend_logger.error(f"加载MQTT配置文件失败: {e}")
+
+def save_mqtt_config():
+    """保存MQTT配置到文件"""
+    try:
+        with open(mqtt_config_file, 'w', encoding='utf-8') as f:
+            json.dump(mqtt_config, f, indent=2, ensure_ascii=False)
+        backend_logger.info(f"MQTT配置已保存到 {mqtt_config_file}")
+    except Exception as e:
+        backend_logger.error(f"保存MQTT配置失败: {e}")
+
+def init_mqtt_client():
+    """初始化MQTT客户端"""
+    global mqtt_client, mqtt_config
+    
+    if not MQTT_AVAILABLE:
+        backend_logger.warning("MQTT库未安装，无法初始化MQTT客户端")
+        return False
+    
+    if not mqtt_config.get('enabled', False):
+        return False
+    
+    try:
+        with mqtt_lock:
+            # 如果已有客户端，先断开
+            if mqtt_client is not None:
+                try:
+                    mqtt_client.disconnect()
+                except:
+                    pass
+                mqtt_client = None
+            
+            # 创建新客户端
+            client_id = f"yzkj_alarm_{int(time.time())}"
+            mqtt_client = mqtt.Client(client_id=client_id)
+            
+            # 设置用户名和密码（如果有）
+            if mqtt_config.get('username'):
+                mqtt_client.username_pw_set(
+                    mqtt_config['username'],
+                    mqtt_config.get('password', '')
+                )
+            
+            # 连接回调
+            def on_connect(client, userdata, flags, rc):
+                if rc == 0:
+                    backend_logger.info(f"MQTT连接成功: {mqtt_config['host']}:{mqtt_config['port']}")
+                else:
+                    backend_logger.error(f"MQTT连接失败，错误代码: {rc}")
+            
+            def on_disconnect(client, userdata, rc):
+                backend_logger.warning(f"MQTT断开连接，错误代码: {rc}")
+            
+            mqtt_client.on_connect = on_connect
+            mqtt_client.on_disconnect = on_disconnect
+            
+            # 连接到服务器
+            try:
+                mqtt_client.connect(
+                    mqtt_config['host'],
+                    mqtt_config['port'],
+                    60  # keepalive
+                )
+                mqtt_client.loop_start()  # 启动后台线程处理消息
+                backend_logger.info("MQTT客户端初始化成功")
+                return True
+            except Exception as e:
+                backend_logger.error(f"MQTT连接失败: {e}")
+                mqtt_client = None
+                return False
+    except Exception as e:
+        backend_logger.error(f"初始化MQTT客户端失败: {e}")
+        mqtt_client = None
+        return False
+
+def send_mqtt_message(payload):
+    """发送MQTT消息"""
+    global mqtt_client, mqtt_config
+    
+    if not mqtt_config.get('enabled', False):
+        return False
+    
+    if mqtt_client is None:
+        # 尝试重新初始化
+        if not init_mqtt_client():
+            return False
+    
+    try:
+        with mqtt_lock:
+            if mqtt_client is None:
+                return False
+            
+            topic = mqtt_config.get('topic', 'CAM1')
+            message = json.dumps(payload)
+            
+            result = mqtt_client.publish(topic, message, qos=1)
+            if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                backend_logger.debug(f"MQTT消息已发送到 {topic}: {message}")
+                return True
+            else:
+                backend_logger.error(f"MQTT消息发送失败，错误代码: {result.rc}")
+                return False
+    except Exception as e:
+        backend_logger.error(f"发送MQTT消息异常: {e}")
+        return False
+
 # 认证装饰器
 def login_required(f):
     """登录验证装饰器"""
@@ -679,6 +830,7 @@ load_classes_config()
 load_display_config()
 load_alarm_config()
 load_occlusion_config()
+load_mqtt_config()
 
 
 def is_point_in_polygon(point, polygon):
@@ -969,6 +1121,10 @@ def trigger_occlusion_alarm(occlusion_ratio):
     # 通过WebSocket发送报警信息
     socketio.emit('alarm', alarm_data)
     backend_logger.warning(f"⚠️  画面遮挡报警！遮挡率: {occlusion_ratio*100:.2f}%, 时间: {current_time}")
+    
+    # 发送MQTT消息
+    send_mqtt_message({"isOccluded": 1})
+    
     return True
 
 def occlusion_detector():
@@ -1076,6 +1232,10 @@ def trigger_alarm(track_id, bbox_center, zone_id, zone_name, class_id=None, clas
     # 通过WebSocket发送报警信息
     socketio.emit('alarm', alarm_data)
     backend_logger.warning(f"⚠️  报警！{object_name}进入监控区域【{zone_name}】！时间: {current_time}, ID: {track_id}")
+    
+    # 发送MQTT消息
+    send_mqtt_message({"hasPeople": 1})
+    
     return True
 
 
@@ -2260,6 +2420,72 @@ def set_occlusion_config():
     except Exception as e:
         return jsonify({"success": False, "message": f"设置失败: {str(e)}"}), 500
 
+@app.route('/api/mqtt', methods=['GET'])
+def get_mqtt_config():
+    """获取MQTT配置"""
+    return jsonify(mqtt_config)
+
+@app.route('/api/mqtt', methods=['POST'])
+@login_required
+def set_mqtt_config():
+    """设置MQTT配置"""
+    global mqtt_config
+    
+    data = request.json
+    
+    try:
+        if 'enabled' in data:
+            mqtt_config['enabled'] = bool(data['enabled'])
+        
+        if 'host' in data:
+            host = data['host'].strip()
+            if not host:
+                return jsonify({"success": False, "message": "MQTT服务器地址不能为空"}), 400
+            mqtt_config['host'] = host
+        
+        if 'port' in data:
+            port = int(data['port'])
+            if port < 1 or port > 65535:
+                return jsonify({"success": False, "message": "端口号必须在1-65535之间"}), 400
+            mqtt_config['port'] = port
+        
+        if 'topic' in data:
+            topic = data['topic'].strip()
+            if not topic:
+                return jsonify({"success": False, "message": "MQTT主题不能为空"}), 400
+            mqtt_config['topic'] = topic
+        
+        if 'username' in data:
+            mqtt_config['username'] = data['username'].strip()
+        
+        if 'password' in data:
+            mqtt_config['password'] = data['password'].strip()
+        
+        save_mqtt_config()
+        
+        # 如果启用了MQTT，重新初始化客户端
+        if mqtt_config['enabled']:
+            init_mqtt_client()
+        else:
+            # 如果禁用了MQTT，断开连接
+            with mqtt_lock:
+                if mqtt_client is not None:
+                    try:
+                        mqtt_client.disconnect()
+                    except:
+                        pass
+                    mqtt_client = None
+        
+        return jsonify({
+            "success": True,
+            "message": "MQTT配置已更新",
+            "config": mqtt_config
+        })
+    except ValueError:
+        return jsonify({"success": False, "message": "参数格式错误"}), 400
+    except Exception as e:
+        backend_logger.error(f"设置MQTT配置失败: {e}")
+        return jsonify({"success": False, "message": f"设置失败: {str(e)}"}), 500
 
 @app.route('/api/classes/custom-name', methods=['POST'])
 def set_custom_name():

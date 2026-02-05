@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "host": "192.168.0.9",
+  "port": 1883,
+  "topic": "CAM1",
+  "username": "",
+  "password": ""
+}

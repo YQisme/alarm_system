@@ -269,6 +269,67 @@
         </el-form>
       </el-tab-pane>
 
+      <!-- MQTT配置 -->
+      <el-tab-pane label="MQTT设置" name="mqtt">
+        <el-form :model="mqttForm" label-width="150px">
+          <el-form-item label="启用MQTT">
+            <el-switch v-model="mqttForm.enabled" />
+            <span style="margin-left: 10px; color: #666; font-size: 12px">
+              启用后，报警信息将发送到MQTT服务器
+            </span>
+          </el-form-item>
+          <el-form-item label="服务器地址">
+            <el-input
+              v-model="mqttForm.host"
+              placeholder="例如: 192.168.0.9"
+              style="width: 300px"
+            />
+          </el-form-item>
+          <el-form-item label="端口">
+            <el-input-number
+              v-model="mqttForm.port"
+              :min="1"
+              :max="65535"
+              style="width: 300px"
+            />
+          </el-form-item>
+          <el-form-item label="主题">
+            <el-input
+              v-model="mqttForm.topic"
+              placeholder="例如: CAM1"
+              style="width: 300px"
+            />
+          </el-form-item>
+          <el-form-item label="用户名（可选）">
+            <el-input
+              v-model="mqttForm.username"
+              placeholder="留空则不需要认证"
+              style="width: 300px"
+            />
+          </el-form-item>
+          <el-form-item label="密码（可选）">
+            <el-input
+              v-model="mqttForm.password"
+              type="password"
+              placeholder="留空则不需要认证"
+              show-password
+              style="width: 300px"
+            />
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" @click="applyMqtt" :loading="mqttLoading">应用MQTT设置</el-button>
+          </el-form-item>
+          <el-form-item>
+            <div style="color: #666; font-size: 12px; line-height: 1.6">
+              <p><strong>报警消息格式：</strong></p>
+              <p>• 人员进入区域：{"hasPeople": 1}</p>
+              <p>• 摄像头掉线：{"isOffline": 1}</p>
+              <p>• 摄像头被遮挡：{"isOccluded": 1}</p>
+            </div>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+
       <!-- 报警配置 -->
       <el-tab-pane label="报警设置" name="alarm">
         <el-form :model="alarmForm" label-width="150px">
@@ -406,6 +467,14 @@ const loginForm = ref({
   old_password: '',
   password: ''
 })
+const mqttForm = ref({
+  enabled: false,
+  host: '192.168.0.9',
+  port: 1883,
+  topic: 'CAM1',
+  username: '',
+  password: ''
+})
 
 const modelLoading = ref(false)
 const videoLoading = ref(false)
@@ -414,6 +483,7 @@ const displayLoading = ref(false)
 const alarmLoading = ref(false)
 const occlusionLoading = ref(false)
 const loginLoading = ref(false)
+const mqttLoading = ref(false)
 
 // RGB 和 Hex 转换
 const rgbToHex = (r, g, b) => {
@@ -527,7 +597,8 @@ onMounted(async () => {
     loadDisplayConfig(),
     loadAlarmConfig(),
     loadOcclusionConfig(),
-    loadLoginConfig()
+    loadLoginConfig(),
+    loadMqttConfig()
   ])
   
   // 每5秒自动更新摄像头状态
@@ -731,6 +802,63 @@ const loadLoginConfig = async () => {
     }
   } catch (error) {
     console.error('加载登录配置失败:', error)
+  }
+}
+
+const loadMqttConfig = async () => {
+  try {
+    const res = await axios.get('/api/mqtt')
+    if (res.data.enabled !== undefined) {
+      mqttForm.value.enabled = res.data.enabled
+    }
+    if (res.data.host !== undefined) {
+      mqttForm.value.host = res.data.host
+    }
+    if (res.data.port !== undefined) {
+      mqttForm.value.port = res.data.port
+    }
+    if (res.data.topic !== undefined) {
+      mqttForm.value.topic = res.data.topic
+    }
+    if (res.data.username !== undefined) {
+      mqttForm.value.username = res.data.username
+    }
+    if (res.data.password !== undefined) {
+      mqttForm.value.password = res.data.password
+    }
+  } catch (error) {
+    console.error('加载MQTT配置失败:', error)
+  }
+}
+
+const applyMqtt = async () => {
+  mqttLoading.value = true
+  try {
+    const res = await axios.post('/api/mqtt', {
+      enabled: mqttForm.value.enabled,
+      host: mqttForm.value.host,
+      port: mqttForm.value.port,
+      topic: mqttForm.value.topic,
+      username: mqttForm.value.username,
+      password: mqttForm.value.password
+    })
+    if (res.data.success) {
+      ElMessage.success(res.data.message || 'MQTT配置已更新')
+    } else {
+      ElMessage.error('设置失败: ' + (res.data.message || '未知错误'))
+    }
+  } catch (error) {
+    console.error('设置MQTT配置失败:', error)
+    if (error.response && error.response.status === 401) {
+      ElMessage.error('未登录，请重新登录')
+      window.location.href = '/login'
+    } else if (error.response && error.response.data && error.response.data.message) {
+      ElMessage.error('设置失败: ' + error.response.data.message)
+    } else {
+      ElMessage.error('设置失败，请检查网络连接')
+    }
+  } finally {
+    mqttLoading.value = false
   }
 }
 
