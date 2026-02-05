@@ -1,6 +1,7 @@
-from flask import Flask, request, jsonify, send_from_directory, Response
+from flask import Flask, request, jsonify, send_from_directory, Response, session
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
+from functools import wraps
 import cv2
 import threading
 import queue
@@ -34,13 +35,16 @@ if VITE_DEV_MODE:
     # 开发模式：只提供 API，前端由 Vite 开发服务器提供
     app = Flask(__name__)
     # 允许所有来源的跨域请求（开发模式，支持IP访问）
-    CORS(app, origins="*")  # 允许所有来源，包括IP地址
+    CORS(app, origins="*", supports_credentials=True)  # 允许所有来源，包括IP地址，支持凭证
 else:
     # 生产模式：提供静态文件
     app = Flask(__name__, static_folder=FRONTEND_DIST_DIR, static_url_path='')
-    CORS(app)  # 允许跨域请求
+    CORS(app, supports_credentials=True)  # 允许跨域请求，支持凭证
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+# 配置session密钥
+app.secret_key = os.urandom(24)  # 生成随机密钥用于session加密
 
 # 设置日志系统（必须在其他模块之前初始化）
 from logging_config import setup_logging
@@ -118,6 +122,13 @@ occlusion_config = {
     "occlusion_threshold": 0.3  # 遮挡率阈值（0-1），超过该值就报警
 }
 occlusion_alarm_triggered = {}  # 遮挡报警记录，用于防抖
+
+# 登录配置
+login_config = {
+    "username": "admin",  # 默认用户名
+    "password": "123456"  # 默认密码
+}
+login_config_file = os.path.join(CONFIG_DIR, "login_config.json")  # 登录配置文件
 
 zones_config_file = os.path.join(CONFIG_DIR, "zones_config.json")  # 多区域配置文件
 config_file = os.path.join(CONFIG_DIR, "system_config.json")  # 系统配置文件
@@ -624,6 +635,43 @@ def save_occlusion_config():
         backend_logger.info(f"遮挡检测配置已保存到 {occlusion_config_file}")
     except Exception as e:
         backend_logger.error(f"保存遮挡检测配置失败: {e}")
+# 登录配置管理
+def load_login_config():
+    """从配置文件加载登录配置"""
+    global login_config
+    if os.path.exists(login_config_file):
+        try:
+            with open(login_config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                if 'username' in config:
+                    login_config['username'] = config['username']
+                if 'password' in config:
+                    login_config['password'] = config['password']
+                backend_logger.info(f"已从 {login_config_file} 加载登录配置")
+        except Exception as e:
+            backend_logger.error(f"加载登录配置文件失败: {e}")
+
+def save_login_config():
+    """保存登录配置到文件"""
+    try:
+        with open(login_config_file, 'w', encoding='utf-8') as f:
+            json.dump(login_config, f, indent=2, ensure_ascii=False)
+        backend_logger.info(f"登录配置已保存到 {login_config_file}")
+    except Exception as e:
+        backend_logger.error(f"保存登录配置失败: {e}")
+
+# 认证装饰器
+def login_required(f):
+    """登录验证装饰器"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # 检查是否已登录
+        if 'logged_in' not in session or not session['logged_in']:
+            return jsonify({"success": False, "message": "未登录", "require_login": True}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+
 
 # 初始化加载配置和模型
 load_system_config()
@@ -2077,6 +2125,99 @@ def set_enabled_classes():
     except Exception as e:
         return jsonify({"success": False, "message": f"设置失败: {str(e)}"}), 500
 
+
+
+# 登录相关API
+@app.route('/api/login', methods=['POST'])
+def login():
+    """用户登录"""
+    data = request.json
+    username = data.get('username', '')
+    password = data.get('password', '')
+    
+    # 验证用户名和密码
+    if username == login_config.get('username', 'admin') and password == login_config.get('password', '123456'):
+        session['logged_in'] = True
+        session['username'] = username
+        return jsonify({
+            "success": True,
+            "message": "登录成功"
+        })
+    else:
+        return jsonify({
+            "success": False,
+            "message": "用户名或密码错误"
+        }), 401
+
+@app.route('/api/logout', methods=['POST'])
+def logout():
+    """用户登出"""
+    session.pop('logged_in', None)
+    session.pop('username', None)
+    return jsonify({
+        "success": True,
+        "message": "已登出"
+    })
+
+@app.route('/api/login/status', methods=['GET'])
+def login_status():
+    """获取登录状态和配置"""
+    is_logged_in = session.get('logged_in', False)
+    
+    return jsonify({
+        "logged_in": is_logged_in,
+        "login_enabled": True,  # 始终启用登录
+        "username": session.get('username', '') if is_logged_in else ''
+    })
+
+@app.route('/api/login/config', methods=['GET'])
+def get_login_config():
+    """获取登录配置（不包含密码）"""
+    config = {
+        "username": login_config.get('username', 'admin')
+    }
+    return jsonify(config)
+
+@app.route('/api/login/config', methods=['POST'])
+@login_required
+def set_login_config():
+    """设置登录配置"""
+    global login_config
+    
+    data = request.json
+    
+    try:
+        # 如果要修改密码，必须验证原密码
+        if 'password' in data and data['password']:
+            old_password = data.get('old_password', '')
+            current_password = login_config.get('password', '123456')
+            
+            # 验证原密码
+            if old_password != current_password:
+                return jsonify({"success": False, "message": "原密码错误，无法修改密码"}), 400
+            
+            # 原密码正确，更新为新密码
+            login_config['password'] = data['password']
+            backend_logger.info("登录密码已更新")
+        
+        if 'username' in data:
+            username = data['username'].strip()
+            if not username:
+                return jsonify({"success": False, "message": "用户名不能为空"}), 400
+            login_config['username'] = username
+            backend_logger.info(f"登录用户名已更新为: {username}")
+        
+        save_login_config()
+        return jsonify({
+            "success": True,
+            "message": "登录配置已更新",
+            "config": {
+                "username": login_config['username']
+            }
+        })
+    except Exception as e:
+        backend_logger.error(f"设置登录配置失败: {e}")
+        return jsonify({"success": False, "message": f"设置失败: {str(e)}"}), 500
 
 @app.route('/api/occlusion', methods=['GET'])
 def get_occlusion_config():

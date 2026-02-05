@@ -13,6 +13,7 @@
               {{ zonesCount > 0 ? `已设置 ${zonesCount} 个区域` : '未设置区域' }}
             </el-tag>
             <el-button type="primary" size="small" @click="goToMonitor">视频监控</el-button>
+            <el-button type="danger" size="small" @click="handleLogout" v-if="loginEnabled">登出</el-button>
           </div>
         </div>
       </el-header>
@@ -136,11 +137,15 @@ const activeTopTab = ref('zones')  // 顶部标签：zones/logs/config
 const activeLogTab = ref('operation')  // 日志子标签：operation/system
 const activeInfoTab = ref('alarm')  // 信息标签：alarm/detection
 const videoPanelRef = ref(null)
+const loginEnabled = ref(true)  // 是否启用登录
 
 // Socket.IO 连接
 let socket = null
 
 onMounted(() => {
+  // 检查登录状态
+  checkLoginStatus()
+
   // 根据环境配置 Socket.IO 连接地址
   const socketUrl = import.meta.env.DEV 
     ? (import.meta.env.VITE_API_URL || `http://${window.location.hostname}:5000`)
@@ -299,6 +304,32 @@ const handleAlarmChanged = () => {
 const goToMonitor = () => {
   router.push('/monitor')
 }
+// 检查登录状态
+const checkLoginStatus = async () => {
+  try {
+    const res = await axios.get('/api/login/status')
+    loginEnabled.value = res.data.login_enabled
+  } catch (error) {
+    console.error('检查登录状态失败:', error)
+  }
+}
+
+// 登出
+const handleLogout = async () => {
+  try {
+    const res = await axios.post('/api/logout')
+    if (res.data.success) {
+      // 跳转到登录页
+      router.push('/login')
+    }
+  } catch (error) {
+    console.error('登出失败:', error)
+    // 即使失败也跳转到登录页
+    router.push('/login')
+  }
+}
+
+
 </script>
 
 <style scoped>

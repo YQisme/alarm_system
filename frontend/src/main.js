@@ -19,5 +19,9 @@ app.use(ElementPlus, {
 
 app.use(router)
 
+// 配置axios默认携带凭证（用于session）
+import axios from 'axios'
+axios.defaults.withCredentials = true
+
 app.mount('#app')
 

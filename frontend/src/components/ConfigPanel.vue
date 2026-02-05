@@ -190,6 +190,46 @@
         </el-form>
       </el-tab-pane>
 
+      <!-- 登录设置 -->
+      <el-tab-pane label="登录设置" name="login">
+        <el-form :model="loginForm" label-width="150px">
+          <el-form-item label="用户名">
+            <el-input
+              v-model="loginForm.username"
+              placeholder="请输入用户名"
+              style="width: 300px"
+            />
+          </el-form-item>
+          <el-form-item label="原密码">
+            <el-input
+              v-model="loginForm.old_password"
+              type="password"
+              placeholder="修改密码时需要输入原密码"
+              show-password
+              style="width: 300px"
+            />
+            <div style="margin-top: 5px; color: #666; font-size: 12px">
+              修改密码时必须输入原密码进行验证
+            </div>
+          </el-form-item>
+          <el-form-item label="新密码">
+            <el-input
+              v-model="loginForm.password"
+              type="password"
+              placeholder="留空则不修改密码"
+              show-password
+              style="width: 300px"
+            />
+            <div style="margin-top: 5px; color: #666; font-size: 12px">
+              留空则不修改密码，输入新密码将更新
+            </div>
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" @click="applyLogin" :loading="loginLoading">修改密码</el-button>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+
       <!-- 遮挡检测配置 -->
       <el-tab-pane label="遮挡检测" name="occlusion">
         <el-form :model="occlusionForm" label-width="150px">
@@ -361,6 +401,11 @@ const occlusionForm = ref({
   check_interval: 5.0,
   occlusion_threshold: 0.3
 })
+const loginForm = ref({
+  username: 'admin',
+  old_password: '',
+  password: ''
+})
 
 const modelLoading = ref(false)
 const videoLoading = ref(false)
@@ -368,6 +413,7 @@ const classesLoading = ref(false)
 const displayLoading = ref(false)
 const alarmLoading = ref(false)
 const occlusionLoading = ref(false)
+const loginLoading = ref(false)
 
 // RGB 和 Hex 转换
 const rgbToHex = (r, g, b) => {
@@ -472,13 +518,17 @@ watch(() => displayForm.value.zone_border_color_rgb, (newRgb) => {
 })
 
 // 加载数据
-onMounted(() => {
-  loadModels()
-  loadVideoUrl()
-  loadClasses()
-  loadDisplayConfig()
-  loadAlarmConfig()
-  loadOcclusionConfig()
+onMounted(async () => {
+  // 并行加载所有配置，避免阻塞
+  await Promise.allSettled([
+    loadModels(),
+    loadVideoUrl(),
+    loadClasses(),
+    loadDisplayConfig(),
+    loadAlarmConfig(),
+    loadOcclusionConfig(),
+    loadLoginConfig()
+  ])
   
   // 每5秒自动更新摄像头状态
   statusCheckInterval = setInterval(() => {
@@ -670,6 +720,17 @@ const loadOcclusionConfig = async () => {
     }
   } catch (error) {
     console.error('加载遮挡检测配置失败:', error)
+  }
+}
+
+const loadLoginConfig = async () => {
+  try {
+    const res = await axios.get('/api/login/config')
+    if (res.data.username !== undefined) {
+      loginForm.value.username = res.data.username
+    }
+  } catch (error) {
+    console.error('加载登录配置失败:', error)
   }
 }
 
@@ -959,6 +1020,59 @@ const applyOcclusion = async () => {
     ElMessage.error('设置失败')
   } finally {
     occlusionLoading.value = false
+  }
+}
+
+const applyLogin = async () => {
+  // 验证：如果要修改密码，必须输入原密码和新密码
+  if (loginForm.value.password) {
+    // 如果输入了新密码，必须输入原密码
+    if (!loginForm.value.old_password) {
+      ElMessage.warning('修改密码时必须输入原密码')
+      return
+    }
+    // 验证新密码不能为空
+    if (!loginForm.value.password.trim()) {
+      ElMessage.warning('新密码不能为空')
+      return
+    }
+  } else if (loginForm.value.old_password) {
+    // 如果只输入了原密码，但没有输入新密码
+    ElMessage.warning('请输入新密码')
+    return
+  } else {
+    // 如果都没有输入，只修改用户名（如果用户名有变化）
+    // 这里允许只修改用户名，不需要密码
+  }
+  
+  loginLoading.value = true
+  try {
+    const res = await axios.post('/api/login/config', {
+      username: loginForm.value.username,
+      old_password: loginForm.value.old_password || undefined,  // 原密码
+      password: loginForm.value.password || undefined  // 新密码，如果为空则不修改
+    })
+    if (res.data.success) {
+      ElMessage.success(res.data.message || '配置已更新')
+      // 清空密码字段
+      loginForm.value.old_password = ''
+      loginForm.value.password = ''
+    } else {
+      ElMessage.error('修改失败: ' + (res.data.message || '未知错误'))
+    }
+  } catch (error) {
+    console.error('修改配置失败:', error)
+    if (error.response && error.response.status === 401) {
+      ElMessage.error('未登录，请重新登录')
+      // 重定向到登录页
+      window.location.href = '/login'
+    } else if (error.response && error.response.data && error.response.data.message) {
+      ElMessage.error('修改失败: ' + error.response.data.message)
+    } else {
+      ElMessage.error('修改失败，请检查网络连接')
+    }
+  } finally {
+    loginLoading.value = false
   }
 }
 </script>
