@@ -1,11 +1,12 @@
 <template>
-  <el-card shadow="hover">
-    <template #header>
-      <div class="card-header">
-        <span>区域管理</span>
-        <el-button type="primary" size="small" @click="startDrawing">新建区域</el-button>
-      </div>
-    </template>
+  <div class="zone-manager">
+    <div class="zone-manager-header">
+      <h3>区域管理</h3>
+      <el-button type="primary" size="small" @click="startDrawing">
+        <el-icon><Plus /></el-icon>
+        新建区域
+      </el-button>
+    </div>
     
     <div class="zone-list">
       <el-empty v-if="zones.length === 0" description="暂无区域" :image-size="80" />
@@ -60,13 +61,13 @@
         </div>
       </div>
     </div>
-  </el-card>
+  </div>
 </template>
 
 <script setup>
 import { ref, defineProps, defineEmits } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Check, Close } from '@element-plus/icons-vue'
+import { Check, Close, Plus } from '@element-plus/icons-vue'
 import axios from 'axios'
 
 const props = defineProps({
@@ -175,14 +176,28 @@ const deleteZone = async (zone) => {
 </script>
 
 <style scoped>
-.card-header {
+.zone-manager {
+  width: 100%;
+}
+
+.zone-manager-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  margin-bottom: 20px;
+  padding-bottom: 15px;
+  border-bottom: 2px solid #e4e7ed;
+}
+
+.zone-manager-header h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #303133;
 }
 
 .zone-list {
-  max-height: 400px;
+  max-height: 500px;
   overflow-y: auto;
 }
 

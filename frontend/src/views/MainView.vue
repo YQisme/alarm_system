@@ -17,18 +17,60 @@
         </div>
       </el-header>
 
-      <!-- 配置面板 -->
-      <el-collapse v-model="activeConfigPanels" class="config-panel">
-        <el-collapse-item title="系统配置" name="config">
-          <ConfigPanel
-            @model-changed="handleModelChanged"
-            @video-changed="handleVideoChanged"
-            @classes-changed="handleClassesChanged"
-            @display-changed="handleDisplayChanged"
-            @alarm-changed="handleAlarmChanged"
-          />
-        </el-collapse-item>
-      </el-collapse>
+      <!-- 顶部导航栏：区域管理、日志、设置 -->
+      <div class="top-nav-bar">
+        <el-tabs v-model="activeTopTab" type="card" class="top-tabs">
+          <el-tab-pane label="区域管理" name="zones">
+            <div class="tab-content">
+              <ZoneManager
+                :zones="zones"
+                @zone-selected="handleZoneSelected"
+                @start-drawing="handleStartDrawing"
+                @zone-updated="handleZoneUpdated"
+              />
+            </div>
+          </el-tab-pane>
+          <el-tab-pane label="日志" name="logs">
+            <div class="tab-content">
+              <el-tabs v-model="activeLogTab" type="border-card" class="log-tabs">
+                <el-tab-pane label="操作日志" name="operation">
+                  <div class="log-container">
+                    <div class="log-header">
+                      <el-button size="small" @click="clearOperationLogs">清空日志</el-button>
+                      <el-checkbox v-model="autoScrollOperationLogs" size="small" style="margin-left: 10px">
+                        自动滚动
+                      </el-checkbox>
+                    </div>
+                    <LogPanel :logs="operationLogs" :auto-scroll="autoScrollOperationLogs" />
+                  </div>
+                </el-tab-pane>
+                <el-tab-pane label="系统日志" name="system">
+                  <div class="log-container">
+                    <div class="log-header">
+                      <el-button size="small" @click="clearLogs">清空日志</el-button>
+                      <el-checkbox v-model="autoScrollLogs" size="small" style="margin-left: 10px">
+                        自动滚动
+                      </el-checkbox>
+                    </div>
+                    <LogPanel :logs="logs" :auto-scroll="autoScrollLogs" />
+                  </div>
+                </el-tab-pane>
+              </el-tabs>
+            </div>
+          </el-tab-pane>
+          <el-tab-pane label="设置" name="config">
+            <div class="tab-content">
+              <ConfigPanel
+                @model-changed="handleModelChanged"
+                @video-changed="handleVideoChanged"
+                @classes-changed="handleClassesChanged"
+                @display-changed="handleDisplayChanged"
+                @alarm-changed="handleAlarmChanged"
+              />
+            </div>
+          </el-tab-pane>
+        </el-tabs>
+      </div>
 
       <!-- 主内容区 -->
       <el-main class="main-content">
@@ -44,51 +86,21 @@
 
           <!-- 侧边栏 -->
           <el-col :span="8">
-            <el-space direction="vertical" :size="20" style="width: 100%">
-              <!-- 区域管理 -->
-              <ZoneManager
-                :zones="zones"
-                @zone-selected="handleZoneSelected"
-                @start-drawing="handleStartDrawing"
-                @zone-updated="handleZoneUpdated"
-              />
-              
-              <!-- 报警记录 -->
-              <el-card shadow="hover">
-                <template #header>
-                  <div class="card-header">
-                    <span>报警记录</span>
-                  </div>
-                </template>
-                <AlarmList :alarms="alarms" />
-              </el-card>
-
-              <!-- 检测信息 -->
-              <el-card shadow="hover">
-                <template #header>
-                  <div class="card-header">
-                    <span>检测信息</span>
-                  </div>
-                </template>
-                <DetectionInfo :detections="detections" />
-              </el-card>
-
-              <!-- 系统日志 -->
-              <el-card shadow="hover">
-                <template #header>
-                  <div class="card-header">
-                    <span>系统日志</span>
-                    <div>
-                      <el-button size="small" @click="clearLogs">清空日志</el-button>
-                      <el-checkbox v-model="autoScrollLogs" size="small" style="margin-left: 10px">
-                        自动滚动
-                      </el-checkbox>
-                    </div>
-                  </div>
-                </template>
-                <LogPanel :logs="logs" :auto-scroll="autoScrollLogs" />
-              </el-card>
-            </el-space>
+            <el-card shadow="hover" class="info-card">
+              <template #header>
+                <div class="card-header">
+                  <span class="card-title">监控信息</span>
+                </div>
+              </template>
+              <el-tabs v-model="activeInfoTab" type="border-card" class="info-tabs">
+                <el-tab-pane label="报警记录" name="alarm">
+                  <AlarmList :alarms="alarms" />
+                </el-tab-pane>
+                <el-tab-pane label="检测信息" name="detection">
+                  <DetectionInfo :detections="detections" />
+                </el-tab-pane>
+              </el-tabs>
+            </el-card>
           </el-col>
         </el-row>
       </el-main>
@@ -116,9 +128,13 @@ const zones = ref([])
 const zonesCount = ref(0)
 const alarms = ref([])
 const detections = ref([])
-const logs = ref([])
+const logs = ref([])  // 系统日志
+const operationLogs = ref([])  // 操作日志
 const autoScrollLogs = ref(true)
-const activeConfigPanels = ref(['config'])
+const autoScrollOperationLogs = ref(true)
+const activeTopTab = ref('zones')  // 顶部标签：zones/logs/config
+const activeLogTab = ref('operation')  // 日志子标签：operation/system
+const activeInfoTab = ref('alarm')  // 信息标签：alarm/detection
 const videoPanelRef = ref(null)
 
 // Socket.IO 连接
@@ -185,6 +201,7 @@ onMounted(() => {
   })
 
   socket.on('log', (data) => {
+    // 系统日志
     logs.value.push(data)
     if (logs.value.length > 1000) {
       logs.value.shift()
@@ -197,30 +214,6 @@ onUnmounted(() => {
     socket.disconnect()
   }
 })
-
-// 事件处理
-const handleModelChanged = () => {
-  // 模型切换后的处理
-}
-
-const handleVideoChanged = () => {
-  // 视频源切换后的处理
-}
-
-const handleClassesChanged = () => {
-  // 类别配置更新后的处理
-}
-
-const handleDisplayChanged = () => {
-  // 显示配置更新后，通知VideoPanel重新加载配置
-  if (videoPanelRef.value && videoPanelRef.value.reloadDisplayConfig) {
-    videoPanelRef.value.reloadDisplayConfig()
-  }
-}
-
-const handleAlarmChanged = () => {
-  // 报警配置更新后的处理
-}
 
 const handleZonesUpdated = async () => {
   // 重新加载区域列表
@@ -243,11 +236,64 @@ const handleStartDrawing = (zone = null) => {
   // 开始绘制区域
   if (videoPanelRef.value && videoPanelRef.value.startDrawing) {
     videoPanelRef.value.startDrawing(zone)
+    if (zone) {
+      addOperationLog(`开始编辑区域: ${zone.name}`, 'INFO')
+    } else {
+      addOperationLog('开始绘制新区域', 'INFO')
+    }
   }
+}
+
+const handleZoneUpdated = () => {
+  handleZonesUpdated()
+  addOperationLog('区域配置已更新', 'INFO')
 }
 
 const clearLogs = () => {
   logs.value = []
+}
+
+const clearOperationLogs = () => {
+  operationLogs.value = []
+}
+
+// 记录操作日志
+const addOperationLog = (message, level = 'INFO') => {
+  const timestamp = new Date().toLocaleString('zh-CN')
+  operationLogs.value.push({
+    timestamp,
+    level,
+    message,
+    logger: 'operation'
+  })
+  if (operationLogs.value.length > 1000) {
+    operationLogs.value.shift()
+  }
+}
+
+// 监听各种操作，记录到操作日志
+const handleModelChanged = () => {
+  addOperationLog('检测模型已切换', 'INFO')
+}
+
+const handleVideoChanged = () => {
+  addOperationLog('视频源已切换', 'INFO')
+}
+
+const handleClassesChanged = () => {
+  addOperationLog('检测类别配置已更新', 'INFO')
+}
+
+const handleDisplayChanged = () => {
+  // 显示配置更新后，通知VideoPanel重新加载配置
+  if (videoPanelRef.value && videoPanelRef.value.reloadDisplayConfig) {
+    videoPanelRef.value.reloadDisplayConfig()
+  }
+  addOperationLog('显示配置已更新', 'INFO')
+}
+
+const handleAlarmChanged = () => {
+  addOperationLog('报警配置已更新', 'INFO')
 }
 
 const goToMonitor = () => {
@@ -287,20 +333,117 @@ const goToMonitor = () => {
   align-items: center;
 }
 
-.config-panel {
-  background: #f8f9fa;
-  border-bottom: 1px solid #dee2e6;
+/* 顶部导航栏 */
+.top-nav-bar {
+  background: white;
+  border-bottom: 2px solid #e4e7ed;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.top-tabs {
+  margin: 0;
+}
+
+.top-tabs :deep(.el-tabs__header) {
+  margin: 0;
+  background: #f5f7fa;
+  padding: 0 20px;
+}
+
+.top-tabs :deep(.el-tabs__item) {
+  height: 50px;
+  line-height: 50px;
+  font-size: 15px;
+  font-weight: 500;
+  padding: 0 30px;
+  border-bottom: 3px solid transparent;
+  transition: all 0.3s;
+}
+
+.top-tabs :deep(.el-tabs__item.is-active) {
+  color: #409eff;
+  border-bottom-color: #409eff;
+  background: white;
+}
+
+.top-tabs :deep(.el-tabs__item:hover) {
+  color: #409eff;
+}
+
+.tab-content {
+  padding: 20px;
+  background: white;
+  min-height: 400px;
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+.log-tabs {
+  border: none;
+}
+
+.log-tabs :deep(.el-tabs__header) {
+  margin-bottom: 15px;
 }
 
 .main-content {
   padding: 20px;
-  background: white;
+  background: #f5f7fa;
+}
+
+.info-card {
+  height: 100%;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+}
+
+.info-card :deep(.el-card__body) {
+  padding: 0;
 }
 
 .card-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  padding: 15px 20px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border-radius: 8px 8px 0 0;
+}
+
+.card-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.info-tabs {
+  border: none;
+}
+
+.info-tabs :deep(.el-tabs__header) {
+  margin: 0;
+  background: #f5f7fa;
+  padding: 0 15px;
+}
+
+.info-tabs :deep(.el-tabs__content) {
+  padding: 15px;
+  min-height: 400px;
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+.log-container {
+  padding: 10px;
+}
+
+.log-header {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #e4e7ed;
 }
 </style>
 
