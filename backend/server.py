@@ -3058,5 +3058,7 @@ if __name__ == '__main__':
     backend_logger.info("启动后端服务...")
     backend_logger.info("访问 http://localhost:5000 查看前端界面")
     backend_logger.info("="*60)
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
+    # 允许在生产环境使用 Werkzeug（用于 systemd 服务部署）
+    # 对于高并发生产环境，建议使用 gunicorn + gevent
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
 
