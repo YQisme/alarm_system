@@ -33,3 +33,4 @@ frontend/*.local
 
 # 报警事件文件
 alarm_events/
+models/*.pt
