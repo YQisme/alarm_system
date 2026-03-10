@@ -13,7 +13,7 @@ HOST_IP=$(hostname -I | awk '{print $1}')
 if [ -z "$HOST_IP" ]; then
     HOST_IP="localhost"
 fi
-echo "访问地址: http://${HOST_IP}:5000"
+echo "请访问前端地址: http://${HOST_IP}:5000"
 echo ""
 echo "按 Ctrl+C 停止服务"
 echo "=========================================="
