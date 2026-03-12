@@ -14,11 +14,6 @@
       <img ref="videoImgRef" class="video-img" :src="processedVideoStreamUrl" @load="onVideoImageLoad" @error="onVideoImageError" />
       <canvas ref="drawCanvasRef" class="draw-canvas" @click="handleCanvasClick" @mousemove="handleCanvasMouseMove" @dblclick="finishDrawing"></canvas>
       
-      <div v-if="isDrawing" class="drawing-hint">
-        <p>🖱️ 点击画面绘制多边形区域</p>
-        <p>✨ 接近起点时自动吸附，点击闭合</p>
-        <p>⌨️ 按 ESC 取消，双击完成</p>
-      </div>
     </div>
     
     <div class="video-controls">
@@ -239,7 +234,17 @@ const toggleDrawing = () => {
   if (isDrawing.value) {
     cancelDrawing()
   } else {
-    startDrawing()
+    ElMessageBox.alert(
+      '🖱️ 点击画面绘制多边形区域<br><br>✨ 接近起点时自动吸附，点击闭合<br><br>⌨️ 按 ESC 取消，双击完成',
+      '绘制多边形区域',
+      {
+        confirmButtonText: '确定',
+        dangerouslyUseHTMLString: true,
+        callback: () => {
+          startDrawing()
+        }
+      }
+    )
   }
 }
 
@@ -596,23 +601,6 @@ defineExpose({
   display: flex;
   justify-content: space-between;
   align-items: center;
-}
-
-.drawing-hint {
-  position: absolute;
-  top: 20px;
-  left: 20px;
-  background: rgba(0, 0, 0, 0.7);
-  color: white;
-  padding: 15px 20px;
-  border-radius: 8px;
-  z-index: 20;
-  backdrop-filter: blur(10px);
-}
-
-.drawing-hint p {
-  margin: 5px 0;
-  font-size: 14px;
 }
 
 .video-controls {
