@@ -109,6 +109,7 @@ gpu_available, device = check_gpu_available()
 zones = []  # 区域列表，格式：[{"id": "uuid", "name": "区域1", "points": [[x,y],...], "enabled": True, "color": {"fill": [0,255,255], "border": [0,255,255]}}, ...]
 next_zone_id = 1  # 下一个区域ID（用于生成唯一ID）
 alarm_triggered = {}  # 记录已触发报警的跟踪ID，格式：{(track_id, class_id, zone_id): timestamp}
+zone_has_people_mqtt_sent = False  # 是否已发送过 hasPeople:1，用于恢复时发送 hasPeople:0
 
 # 报警配置
 alarm_config = {
@@ -128,6 +129,7 @@ occlusion_config = {
     "occlusion_threshold": 0.3  # 遮挡率阈值（0-1），超过该值就报警
 }
 occlusion_alarm_triggered = {}  # 遮挡报警记录，用于防抖
+occlusion_mqtt_1_sent = False  # 是否已发送过 isOccluded:1，用于恢复时发送 isOccluded:0
 
 # MQTT配置
 mqtt_config = {
@@ -354,6 +356,9 @@ def camera_status_checker():
                 # 如果状态从在线变为离线，触发报警
                 if previous_status == "online" and camera_status == "offline":
                     trigger_camera_offline_alarm(current_ip)
+                # 如果状态从离线变为在线，发送恢复消息
+                elif previous_status == "offline" and camera_status == "online":
+                    send_mqtt_message({"isOffline": 0})
             else:
                 with camera_status_lock:
                     camera_status = "unknown"
@@ -1104,7 +1109,7 @@ def detect_occlusion(frame1, frame2):
 
 def trigger_occlusion_alarm(occlusion_ratio):
     """触发遮挡报警"""
-    global occlusion_alarm_triggered, alarm_config
+    global occlusion_alarm_triggered, occlusion_mqtt_1_sent, alarm_config
     
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     alarm_key = "occlusion_detection"
@@ -1138,12 +1143,13 @@ def trigger_occlusion_alarm(occlusion_ratio):
     
     # 发送MQTT消息
     send_mqtt_message({"isOccluded": 1})
+    occlusion_mqtt_1_sent = True
     
     return True
 
 def occlusion_detector():
     """遮挡检测线程"""
-    global latest_frame, occlusion_config
+    global latest_frame, occlusion_config, occlusion_mqtt_1_sent
     
     last_frame = None
     last_check_time = 0
@@ -1174,6 +1180,10 @@ def occlusion_detector():
                             trigger_occlusion_alarm(occlusion_ratio)
                             backend_logger.info(f"检测到画面遮挡，遮挡率: {occlusion_ratio*100:.2f}%")
                         else:
+                            # 遮挡解除后第一次检测到不遮挡时，发送恢复消息
+                            if occlusion_mqtt_1_sent:
+                                send_mqtt_message({"isOccluded": 0})
+                                occlusion_mqtt_1_sent = False
                             backend_logger.debug(f"遮挡检测正常，遮挡率: {occlusion_ratio*100:.2f}%")
                     
                     # 更新上一帧
@@ -1193,7 +1203,7 @@ def occlusion_detector():
 
 def trigger_alarm(track_id, bbox_center, zone_id, zone_name, class_id=None, class_name_cn=None):
     """触发报警"""
-    global alarm_triggered, alarm_config
+    global alarm_triggered, zone_has_people_mqtt_sent, alarm_config
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     # 使用 (track_id, class_id, zone_id) 作为唯一标识，避免不同类别和区域的相同ID冲突
@@ -1249,6 +1259,7 @@ def trigger_alarm(track_id, bbox_center, zone_id, zone_name, class_id=None, clas
     
     # 发送MQTT消息
     send_mqtt_message({"hasPeople": 1})
+    zone_has_people_mqtt_sent = True
     
     return True
 
@@ -1321,7 +1332,7 @@ def video_reader():
 
 def detection_worker():
     """检测工作线程"""
-    global latest_frame, latest_results, latest_annotated_frame, zones, fps_counter, display_config
+    global latest_frame, latest_results, latest_annotated_frame, zones, fps_counter, display_config, zone_has_people_mqtt_sent
     
     while not stop_flag.is_set():
         try:
@@ -1358,6 +1369,7 @@ def detection_worker():
             
             # 检测对象是否进入任何启用的区域
             enabled_zones = [z for z in zones if z.get('enabled', True) and len(z.get('points', [])) >= 3]
+            person_in_zone_this_frame = False
             if enabled_zones:
                 if results.boxes is not None and len(results.boxes) > 0:
                     boxes = results.boxes
@@ -1393,12 +1405,17 @@ def detection_worker():
                                         in_zone = is_bbox_in_polygon([x1, y1, x2, y2], zone_points)
                                     
                                     if in_zone:
+                                        person_in_zone_this_frame = True
                                         track_id = int(track_ids[i])
                                         class_name_cn = get_class_name_cn(cls_id)
                                         zone_id = zone.get('id', 'unknown')
                                         zone_name = zone.get('name', '未知区域')
                                         trigger_alarm(track_id, bbox_center, zone_id, zone_name, cls_id, class_name_cn)
                                         break  # 只对第一个匹配的区域报警
+                # 本帧无人进入任何区域且此前已发送过 hasPeople:1 时，发送恢复消息
+                if not person_in_zone_this_frame and zone_has_people_mqtt_sent:
+                    send_mqtt_message({"hasPeople": 0})
+                    zone_has_people_mqtt_sent = False
             
             # 手动绘制检测框（只显示启用的类别）
             annotated_frame = frame.copy()
