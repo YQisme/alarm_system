@@ -869,6 +869,20 @@ def is_bbox_in_polygon(bbox, polygon):
     return False
 
 
+def _box_has_valid_data(box):
+    """检查 YOLO 单条 box 的 cls/conf/xyxy 是否非空，避免对空张量取 [0] 导致 index out of bounds"""
+    if box is None:
+        return False
+    for attr in ('cls', 'conf', 'xyxy'):
+        t = getattr(box, attr, None)
+        if t is None:
+            return False
+        n = t.numel() if hasattr(t, 'numel') else len(t)
+        if n == 0:
+            return False
+    return True
+
+
 def save_alarm_event_video(track_id, zone_id, zone_name, class_id, class_name_cn, bbox_center):
     """保存报警事件视频（使用ffmpeg从RTSP流录制指定时长）"""
     try:
@@ -1351,6 +1365,8 @@ def detection_worker():
                     
                     if track_ids is not None:
                         for i, box in enumerate(boxes):
+                            if not _box_has_valid_data(box):
+                                continue
                             cls_id = int(box.cls[0])
                             
                             # 只检测启用的类别
@@ -1393,6 +1409,8 @@ def detection_worker():
                 
                 if track_ids is not None:
                     for i, box in enumerate(boxes):
+                        if not _box_has_valid_data(box):
+                            continue
                         cls_id = int(box.cls[0])
                         
                         # 只绘制启用的类别
@@ -1603,6 +1621,8 @@ def detection_worker():
                 
                 if track_ids is not None:
                     for i, box in enumerate(boxes):
+                        if not _box_has_valid_data(box):
+                            continue
                         cls_id = int(box.cls[0])
                         
                         # 只处理启用的类别
@@ -2378,6 +2398,23 @@ def set_login_config():
     except Exception as e:
         backend_logger.error(f"设置登录配置失败: {e}")
         return jsonify({"success": False, "message": f"设置失败: {str(e)}"}), 500
+
+
+@app.route('/api/restart', methods=['POST'])
+@login_required
+def restart_server():
+    """重启服务（延迟退出进程，由 systemd 或启动脚本自动拉起）"""
+    try:
+        def do_exit():
+            time.sleep(1.5)
+            backend_logger.info("正在重启服务...")
+            os._exit(0)
+        threading.Thread(target=do_exit, daemon=True).start()
+        return jsonify({"success": True, "message": "服务即将重启，请稍候重新连接"})
+    except Exception as e:
+        backend_logger.error(f"重启失败: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
 
 @app.route('/api/occlusion', methods=['GET'])
 def get_occlusion_config():
