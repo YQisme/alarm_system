@@ -408,6 +408,20 @@
           </el-form-item>
         </el-form>
       </el-tab-pane>
+
+      <!-- 系统 -->
+      <el-tab-pane label="系统" name="system">
+        <el-form label-width="120px">
+          <el-form-item label="重启服务">
+            <el-button type="warning" @click="confirmRestart" :loading="restartLoading">
+              重启服务
+            </el-button>
+            <span style="margin-left: 10px; color: #666; font-size: 12px">
+              部分设置（如模型、视频源、登录、MQTT）需重启服务后生效
+            </span>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
     </el-tabs>
   </div>
 </template>
@@ -484,6 +498,7 @@ const alarmLoading = ref(false)
 const occlusionLoading = ref(false)
 const loginLoading = ref(false)
 const mqttLoading = ref(false)
+const restartLoading = ref(false)
 
 // RGB 和 Hex 转换
 const rgbToHex = (r, g, b) => {
@@ -844,6 +859,7 @@ const applyMqtt = async () => {
     })
     if (res.data.success) {
       ElMessage.success(res.data.message || 'MQTT配置已更新')
+      showRestartHint()
     } else {
       ElMessage.error('设置失败: ' + (res.data.message || '未知错误'))
     }
@@ -882,6 +898,7 @@ const applyModel = async () => {
       ElMessage.success(res.data.message)
       emit('model-changed')
       loadModels()
+      showRestartHint()
     } else {
       ElMessage.error('切换失败: ' + res.data.message)
     }
@@ -927,6 +944,7 @@ const applyVideo = async () => {
         videoForm.value.camera_check_interval = res.data.camera_check_interval
       }
       emit('video-changed')
+      showRestartHint()
     } else {
       ElMessage.error('设置失败: ' + res.data.message)
     }
@@ -1182,9 +1200,9 @@ const applyLogin = async () => {
     })
     if (res.data.success) {
       ElMessage.success(res.data.message || '配置已更新')
-      // 清空密码字段
       loginForm.value.old_password = ''
       loginForm.value.password = ''
+      showRestartHint()
     } else {
       ElMessage.error('修改失败: ' + (res.data.message || '未知错误'))
     }
@@ -1201,6 +1219,43 @@ const applyLogin = async () => {
     }
   } finally {
     loginLoading.value = false
+  }
+}
+
+// 提示：部分设置需重启服务后生效
+const showRestartHint = () => {
+  ElMessage.success({
+    message: '设置已保存。重启服务后才能完全生效，请到「系统」页点击「重启服务」。',
+    duration: 5000,
+    showClose: true
+  })
+}
+
+const confirmRestart = async () => {
+  try {
+    await ElMessageBox.confirm(
+      '确定要重启服务吗？重启后请稍候重新打开页面。',
+      '重启服务',
+      {
+        confirmButtonText: '确定重启',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+    restartLoading.value = true
+    const res = await axios.post('/api/restart')
+    if (res.data.success) {
+      ElMessage.success(res.data.message || '服务即将重启，请稍候重新连接')
+    } else {
+      ElMessage.error(res.data.message || '重启失败')
+    }
+  } catch (e) {
+    if (e !== 'cancel') {
+      console.error('重启失败:', e)
+      ElMessage.error('重启失败，请检查网络或登录状态')
+    }
+  } finally {
+    restartLoading.value = false
   }
 }
 </script>

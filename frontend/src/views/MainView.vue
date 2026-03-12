@@ -4,7 +4,7 @@
       <!-- 头部 -->
       <el-header class="app-header">
         <div class="header-content">
-          <h1>YOLO 人员检测与区域报警系统</h1>
+          <h1>人员检测与区域报警系统</h1>
           <div class="status-bar">
             <el-tag :type="connectionStatus === 'connected' ? 'success' : 'danger'" effect="dark">
               {{ connectionStatus === 'connected' ? '已连接' : '未连接' }}
@@ -18,65 +18,10 @@
         </div>
       </el-header>
 
-      <!-- 顶部导航栏：区域管理、日志、设置 -->
-      <div class="top-nav-bar">
-        <el-tabs v-model="activeTopTab" type="card" class="top-tabs">
-          <el-tab-pane label="区域管理" name="zones">
-            <div class="tab-content">
-              <ZoneManager
-                :zones="zones"
-                @zone-selected="handleZoneSelected"
-                @start-drawing="handleStartDrawing"
-                @zone-updated="handleZoneUpdated"
-              />
-            </div>
-          </el-tab-pane>
-          <el-tab-pane label="日志" name="logs">
-            <div class="tab-content">
-              <el-tabs v-model="activeLogTab" type="border-card" class="log-tabs">
-                <el-tab-pane label="操作日志" name="operation">
-                  <div class="log-container">
-                    <div class="log-header">
-                      <el-button size="small" @click="clearOperationLogs">清空日志</el-button>
-                      <el-checkbox v-model="autoScrollOperationLogs" size="small" style="margin-left: 10px">
-                        自动滚动
-                      </el-checkbox>
-                    </div>
-                    <LogPanel :logs="operationLogs" :auto-scroll="autoScrollOperationLogs" />
-                  </div>
-                </el-tab-pane>
-                <el-tab-pane label="系统日志" name="system">
-                  <div class="log-container">
-                    <div class="log-header">
-                      <el-button size="small" @click="clearLogs">清空日志</el-button>
-                      <el-checkbox v-model="autoScrollLogs" size="small" style="margin-left: 10px">
-                        自动滚动
-                      </el-checkbox>
-                    </div>
-                    <LogPanel :logs="logs" :auto-scroll="autoScrollLogs" />
-                  </div>
-                </el-tab-pane>
-              </el-tabs>
-            </div>
-          </el-tab-pane>
-          <el-tab-pane label="设置" name="config">
-            <div class="tab-content">
-              <ConfigPanel
-                @model-changed="handleModelChanged"
-                @video-changed="handleVideoChanged"
-                @classes-changed="handleClassesChanged"
-                @display-changed="handleDisplayChanged"
-                @alarm-changed="handleAlarmChanged"
-              />
-            </div>
-          </el-tab-pane>
-        </el-tabs>
-      </div>
-
       <!-- 主内容区 -->
       <el-main class="main-content">
-        <el-row :gutter="20">
-          <!-- 视频面板 -->
+        <!-- 上方：视频 + 监控信息 -->
+        <el-row :gutter="20" class="video-row">
           <el-col :span="16">
             <VideoPanel
               ref="videoPanelRef"
@@ -84,8 +29,6 @@
               @zones-updated="handleZonesUpdated"
             />
           </el-col>
-
-          <!-- 侧边栏 -->
           <el-col :span="8">
             <el-card shadow="hover" class="info-card">
               <template #header>
@@ -104,6 +47,61 @@
             </el-card>
           </el-col>
         </el-row>
+
+        <!-- 下方：区域管理、日志、设置 -->
+        <div class="bottom-nav-bar">
+          <el-tabs v-model="activeTopTab" type="card" class="top-tabs">
+            <el-tab-pane label="区域管理" name="zones">
+              <div class="tab-content">
+                <ZoneManager
+                  :zones="zones"
+                  @zone-selected="handleZoneSelected"
+                  @start-drawing="handleStartDrawing"
+                  @zone-updated="handleZoneUpdated"
+                />
+              </div>
+            </el-tab-pane>
+            <el-tab-pane label="日志" name="logs">
+              <div class="tab-content">
+                <el-tabs v-model="activeLogTab" type="border-card" class="log-tabs">
+                  <el-tab-pane label="操作日志" name="operation">
+                    <div class="log-container">
+                      <div class="log-header">
+                        <el-button size="small" @click="clearOperationLogs">清空日志</el-button>
+                        <el-checkbox v-model="autoScrollOperationLogs" size="small" style="margin-left: 10px">
+                          自动滚动
+                        </el-checkbox>
+                      </div>
+                      <LogPanel :logs="operationLogs" :auto-scroll="autoScrollOperationLogs" />
+                    </div>
+                  </el-tab-pane>
+                  <el-tab-pane label="系统日志" name="system">
+                    <div class="log-container">
+                      <div class="log-header">
+                        <el-button size="small" @click="clearLogs">清空日志</el-button>
+                        <el-checkbox v-model="autoScrollLogs" size="small" style="margin-left: 10px">
+                          自动滚动
+                        </el-checkbox>
+                      </div>
+                      <LogPanel :logs="logs" :auto-scroll="autoScrollLogs" />
+                    </div>
+                  </el-tab-pane>
+                </el-tabs>
+              </div>
+            </el-tab-pane>
+            <el-tab-pane label="设置" name="config">
+              <div class="tab-content">
+                <ConfigPanel
+                  @model-changed="handleModelChanged"
+                  @video-changed="handleVideoChanged"
+                  @classes-changed="handleClassesChanged"
+                  @display-changed="handleDisplayChanged"
+                  @alarm-changed="handleAlarmChanged"
+                />
+              </div>
+            </el-tab-pane>
+          </el-tabs>
+        </div>
       </el-main>
     </el-container>
   </div>
@@ -364,11 +362,16 @@ const handleLogout = async () => {
   align-items: center;
 }
 
-/* 顶部导航栏 */
-.top-nav-bar {
+.video-row {
+  margin-bottom: 20px;
+}
+
+/* 下方：区域管理、日志、设置 */
+.bottom-nav-bar {
   background: white;
-  border-bottom: 2px solid #e4e7ed;
+  border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  overflow: hidden;
 }
 
 .top-tabs {
