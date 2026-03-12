@@ -2479,6 +2479,19 @@ def get_mqtt_config():
     """获取MQTT配置"""
     return jsonify(mqtt_config)
 
+@app.route('/api/mqtt/clear_alarm', methods=['POST'])
+@login_required
+def clear_alarm_mqtt():
+    """清除报警信息：向 MQTT 发送 isOffline/isOccluded/hasPeople 的恢复消息"""
+    try:
+        send_mqtt_message({"isOffline": 0})
+        send_mqtt_message({"isOccluded": 0})
+        send_mqtt_message({"hasPeople": 0})
+        return jsonify({"success": True, "message": "已发送清除报警信息到 MQTT"})
+    except Exception as e:
+        backend_logger.error(f"清除报警 MQTT 发送失败: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
 @app.route('/api/mqtt', methods=['POST'])
 @login_required
 def set_mqtt_config():

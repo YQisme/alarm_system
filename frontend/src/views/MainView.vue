@@ -38,7 +38,12 @@
               </template>
               <el-tabs v-model="activeInfoTab" type="border-card" class="info-tabs">
                 <el-tab-pane label="报警记录" name="alarm">
-                  <AlarmList :alarms="alarms" />
+                  <div class="alarm-tab-wrap">
+                    <div class="alarm-header">
+                      <el-button size="small" type="primary" @click="clearAlarmMqtt" :loading="clearAlarmMqttLoading">清除报警信息</el-button>
+                    </div>
+                    <AlarmList :alarms="alarms" />
+                  </div>
                 </el-tab-pane>
                 <el-tab-pane label="检测信息" name="detection">
                   <DetectionInfo :detections="detections" />
@@ -111,6 +116,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { io } from 'socket.io-client'
+import { ElMessage } from 'element-plus'
 import axios from 'axios'
 import ConfigPanel from '../components/ConfigPanel.vue'
 import VideoPanel from '../components/VideoPanel.vue'
@@ -136,6 +142,7 @@ const activeLogTab = ref('operation')  // 日志子标签：operation/system
 const activeInfoTab = ref('alarm')  // 信息标签：alarm/detection
 const videoPanelRef = ref(null)
 const loginEnabled = ref(true)  // 是否启用登录
+const clearAlarmMqttLoading = ref(false)
 
 // Socket.IO 连接
 let socket = null
@@ -254,6 +261,24 @@ const handleZoneUpdated = () => {
 
 const clearLogs = () => {
   logs.value = []
+}
+
+// 清除报警信息：向 MQTT 发送 isOffline/isOccluded/hasPeople 的 0 消息
+const clearAlarmMqtt = async () => {
+  clearAlarmMqttLoading.value = true
+  try {
+    const res = await axios.post('/api/mqtt/clear_alarm')
+    if (res.data.success) {
+      ElMessage.success(res.data.message || '已发送清除报警信息到 MQTT')
+    } else {
+      ElMessage.warning(res.data.message || '操作失败')
+    }
+  } catch (error) {
+    console.error('清除报警信息失败:', error)
+    ElMessage.error(error.response?.data?.message || '请求失败')
+  } finally {
+    clearAlarmMqttLoading.value = false
+  }
 }
 
 const clearOperationLogs = () => {
@@ -472,6 +497,19 @@ const handleLogout = async () => {
 }
 
 .log-header {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #e4e7ed;
+}
+
+.alarm-tab-wrap {
+  padding: 0;
+}
+
+.alarm-header {
   display: flex;
   justify-content: flex-end;
   align-items: center;
