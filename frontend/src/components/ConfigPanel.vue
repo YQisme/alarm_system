@@ -14,6 +14,16 @@
               />
             </el-select>
           </el-form-item>
+          <el-form-item label="推理尺寸 (imgsz)">
+            <el-input-number
+              v-model="modelForm.imgsz"
+              :min="32"
+              :max="2048"
+              :step="32"
+              style="width: 140px"
+            />
+            <span style="margin-left: 10px; color: #666; font-size: 12px">YOLO 输入边长（像素），常用 640</span>
+          </el-form-item>
           <el-form-item>
             <el-button type="primary" @click="applyModel" :loading="modelLoading">应用</el-button>
           </el-form-item>
@@ -439,7 +449,8 @@ const models = ref([])
 const classesData = ref([])
 const enabledClasses = ref([])
 
-const modelForm = ref({ model: '' })
+const modelForm = ref({ model: '', imgsz: 640 })
+const currentModelName = ref('')
 const videoForm = ref({ 
   video_url: '',
   camera_ip: '',
@@ -635,6 +646,12 @@ const loadModels = async () => {
     const current = models.value.find(m => m.current)
     if (current) {
       modelForm.value.model = current.name
+    }
+    if (res.data.current) {
+      currentModelName.value = res.data.current
+    }
+    if (res.data.imgsz != null) {
+      modelForm.value.imgsz = Number(res.data.imgsz) || 640
     }
   } catch (error) {
     console.error('加载模型列表失败:', error)
@@ -885,28 +902,36 @@ const applyModel = async () => {
     return
   }
   
+  const modelChanged = modelForm.value.model !== currentModelName.value
+  if (modelChanged) {
+    try {
+      await ElMessageBox.confirm(
+        `确定要切换到模型 "${modelForm.value.model}" 吗？切换后检测将使用新模型。`,
+        '确认切换',
+        { type: 'warning' }
+      )
+    } catch (e) {
+      if (e === 'cancel') return
+    }
+  }
+  
   try {
-    await ElMessageBox.confirm(
-      `确定要切换到模型 "${modelForm.value.model}" 吗？切换后检测将使用新模型。`,
-      '确认切换',
-      { type: 'warning' }
-    )
-    
     modelLoading.value = true
-    const res = await axios.post('/api/model', { model: modelForm.value.model })
+    const res = await axios.post('/api/model', {
+      model: modelForm.value.model,
+      imgsz: modelForm.value.imgsz
+    })
     if (res.data.success) {
       ElMessage.success(res.data.message)
       emit('model-changed')
       loadModels()
-      showRestartHint()
+      if (modelChanged) showRestartHint()
     } else {
-      ElMessage.error('切换失败: ' + res.data.message)
+      ElMessage.error('操作失败: ' + res.data.message)
     }
   } catch (error) {
-    if (error !== 'cancel') {
-      console.error('切换模型失败:', error)
-      ElMessage.error('切换模型失败')
-    }
+    console.error('应用模型配置失败:', error)
+    ElMessage.error(error.response?.data?.message || '应用模型配置失败')
   } finally {
     modelLoading.value = false
   }

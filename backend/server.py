@@ -240,6 +240,7 @@ display_config = {
 model_lock = threading.Lock()  # 模型访问锁
 video_lock = threading.Lock()  # 视频路径访问锁
 current_model_name = "yolo26m_640_int8.engine"  # 当前模型文件名
+yolo_imgsz = 640  # YOLO 推理输入尺寸（正方形边长），用于 model.track(imgsz=...)
 video_path = "rtsp://admin:scyzkj123456@192.168.1.2:554/h264/ch1/main/av_stream"  # 视频路径
 camera_ip = ""  # 摄像头IP地址
 camera_status = "unknown"  # 摄像头状态：online/offline/unknown
@@ -375,13 +376,20 @@ def camera_status_checker():
 # 加载系统配置
 def load_system_config():
     """从配置文件加载系统配置"""
-    global current_model_name, video_path, camera_ip, model
+    global current_model_name, yolo_imgsz, video_path, camera_ip, model
     if os.path.exists(config_file):
         try:
             with open(config_file, 'r') as f:
                 config = json.load(f)
                 if 'model' in config:
                     current_model_name = config['model']
+                if 'imgsz' in config:
+                    try:
+                        yolo_imgsz = int(config['imgsz'])
+                        if yolo_imgsz < 32 or yolo_imgsz > 2048:
+                            yolo_imgsz = 640
+                    except (TypeError, ValueError):
+                        yolo_imgsz = 640
                 if 'video_url' in config:
                     video_path = config['video_url']
                 if 'camera_ip' in config:
@@ -402,9 +410,10 @@ def load_system_config():
 
 def save_system_config():
     """保存系统配置到文件"""
-    global camera_ip, camera_check_interval
+    global camera_ip, camera_check_interval, yolo_imgsz
     config = {
         "model": current_model_name,
+        "imgsz": yolo_imgsz,
         "video_url": video_path,
         "camera_ip": camera_ip,
         "camera_check_interval": camera_check_interval
@@ -1358,8 +1367,8 @@ def detection_worker():
                     if model is None:
                         time.sleep(0.1)
                         continue
-                    # 在使用时指定设备，stream=True返回生成器，需要获取第一个结果
-                    results_generator = model.track(frame, persist=True, stream=True, device=device,classes=[0])
+                    # 在使用时指定设备与推理尺寸，stream=True返回生成器，需要获取第一个结果
+                    results_generator = model.track(frame, persist=True, stream=True, device=device, classes=[0], imgsz=yolo_imgsz)
                     results = next(results_generator)  # 从生成器中获取结果
                 latest_results = results
             except Exception as e:
@@ -2157,25 +2166,55 @@ def get_models():
                         "current": filename == current_model_name
                     })
         models.sort(key=lambda x: x['name'])
-        return jsonify({"models": models, "current": current_model_name})
+        return jsonify({"models": models, "current": current_model_name, "imgsz": yolo_imgsz})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/model', methods=['POST'])
 def set_model():
-    """切换模型"""
-    global current_model_name, model
+    """切换模型或更新推理配置（如 imgsz）"""
+    global current_model_name, model, yolo_imgsz
     
-    data = request.json
+    data = request.json or {}
     model_name = data.get('model')
+    imgsz_val = data.get('imgsz')
+    
+    if imgsz_val is not None:
+        try:
+            imgsz_int = int(imgsz_val)
+            if 32 <= imgsz_int <= 2048:
+                yolo_imgsz = imgsz_int
+            else:
+                return jsonify({"success": False, "message": "imgsz 需在 32～2048 之间"}), 400
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": "imgsz 必须为整数"}), 400
     
     if not model_name:
+        # 仅更新 imgsz 等配置
+        if imgsz_val is not None:
+            save_system_config()
+            return jsonify({
+                "success": True,
+                "message": f"推理尺寸已更新为 {yolo_imgsz}",
+                "current_model": current_model_name,
+                "imgsz": yolo_imgsz
+            })
         return jsonify({"success": False, "message": "未指定模型名称"}), 400
     
     model_path = os.path.join(MODELS_DIR, model_name)
     if not os.path.exists(model_path):
         return jsonify({"success": False, "message": f"模型文件不存在: {model_name}"}), 404
+    
+    if model_name == current_model_name:
+        # 模型未变，仅更新 imgsz 等配置，不重新加载模型
+        save_system_config()
+        return jsonify({
+            "success": True,
+            "message": f"推理尺寸已更新为 {yolo_imgsz}",
+            "current_model": current_model_name,
+            "imgsz": yolo_imgsz
+        })
     
     try:
         old_model_name = current_model_name
@@ -2185,7 +2224,8 @@ def set_model():
         return jsonify({
             "success": True,
             "message": f"模型已切换: {old_model_name} -> {model_name}",
-            "current_model": current_model_name
+            "current_model": current_model_name,
+            "imgsz": yolo_imgsz
         })
     except Exception as e:
         current_model_name = old_model_name
